@@ -21,8 +21,9 @@
 
 // the mock server has Apollo architecture
 
-std::string backendStringTemplate = "iqm;emulate;false;qpu-architecture;{};url;"
-                                    "http://localhost:9100"; // add architecture
+std::string backendStringTemplate =
+    "iqm;emulate;false;qpu-architecture;{};url;"
+    "http://localhost:62443"; // add architecture
 
 CUDAQ_TEST(IQMTester, executeOneMeasuredQubitProgram) {
   std::string arch = "Apollo";
@@ -91,14 +92,11 @@ CUDAQ_TEST(IQMTester, executeLoopOverQubitsProgram) {
 
   kernel.for_loop(
       0, N - 1, [&](auto i) { kernel.x<cudaq::ctrl>(qubit[i], qubit[i + 1]); });
-  kernel.mz(qubit[0]);
 
-  // Connectivity constructed with the above loop does not match Apollo, so we
-  // do not expect to get any counts
-  EXPECT_THAT(
-      [&]() { auto counts = cudaq::sample(kernel); },
-      testing::ThrowsMessage<std::runtime_error>(testing::HasSubstr(
-          "Some circuits in the batch have gates between uncoupled qubits")));
+  kernel.mz(qubit[0]);
+  auto counts = cudaq::sample(kernel);
+
+  EXPECT_EQ(counts.size(), 2);
 }
 
 CUDAQ_TEST(IQMTester, executeMultipleMeasuredQubitsProgram) {

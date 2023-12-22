@@ -4,7 +4,7 @@
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
- *******************************************************************************/
+ ******************************************************************************/
 
 #ifndef CUDAQ_OPTIMIZER_DIALECT_QUAKE_IR_QUAKE_INTERFACES
 #define CUDAQ_OPTIMIZER_DIALECT_QUAKE_IR_QUAKE_INTERFACES
@@ -47,6 +47,13 @@ def OperatorInterface : OpInterface<"OperatorInterface"> {
       /*methodName=*/ "getControls",
       /*args=*/ (ins),
       /*methodBody=*/ "return $_op.getControls();"
+    >,
+    InterfaceMethod<
+      /*desc=*/ "Returns the set of qubits that were operated upon",
+      /*retType=*/ "mlir::ValueRange",
+      /*methodName=*/ "getWires",
+      /*args=*/ (ins),
+      /*methodBody=*/ "return $_op.getWires();"
     >,
     InterfaceMethod<
       /*desc=*/ "Returns an array indicating whether controls are negated",
@@ -97,6 +104,13 @@ def MeasurementInterface : OpInterface<"MeasurementInterface"> {
       /*methodName=*/ "getTargets",
       /*args=*/ (ins),
       /*methodBody=*/ "return $_op.getTargets();"
+    >,
+    InterfaceMethod<
+      /*desc=*/ "Returns the set of qubits that were measured",
+      /*retType=*/ "mlir::ValueRange",
+      /*methodName=*/ "getWires",
+      /*args=*/ (ins),
+      /*methodBody=*/ "return $_op.getWires();"
     >,
     InterfaceMethod<
       /*desc=*/ "Returns the register name, if any.",

@@ -1,0 +1,28 @@
+name: run-in-docker
+
+inputs:
+  image:
+    required: true
+  run:
+    required: true
+  shell:
+    default: "bash"
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: |
+        # Note: "bash -s << EOF" does not play nice with mpirun/mpiexec. It
+        # silently skips any shell commands that come after the mpirun/mpiexec,
+        # so don't use it. Use this instead, which seems to work better.
+        tmpFile=$(mktemp)
+        cat > $tmpFile << 'EOF'
+        ${{ inputs.run }}
+        EOF
+        chown $(id -u):$(id -g) $tmpFile
+        container=$(docker run -id ${{ inputs.image }})
+        docker cp $tmpFile $container:$tmpFile
+        docker exec $container ${{ inputs.shell }} $tmpFile
+        docker stop $container
+        rm $tmpFile

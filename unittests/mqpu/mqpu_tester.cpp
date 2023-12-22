@@ -7,6 +7,7 @@
  ******************************************************************************/
 #include <cudaq.h>
 #include <cudaq/algorithm.h>
+#include <cudaq/algorithms/state.h>
 #include <gtest/gtest.h>
 #include <random>
 
@@ -24,7 +25,7 @@ TEST(MQPUTester, checkSimple) {
 
   double result = cudaq::observe<cudaq::parallel::thread>(ansatz, h, 0.59);
   EXPECT_NEAR(result, -1.7487, 1e-3);
-  printf("Get energy directly as double %lf\n", result);
+  printf("Get energy directly as double %.16lf\n", result);
 }
 
 TEST(MQPUTester, checkLarge) {
@@ -34,7 +35,7 @@ TEST(MQPUTester, checkLarge) {
   printf("Num QPUs %lu\n", platform.num_qpus());
   int nQubits = 12;
   int nTerms = 1000; /// Scale this on multiple gpus to see speed up
-  auto H = cudaq::spin_op::random(nQubits, nTerms);
+  auto H = cudaq::spin_op::random(nQubits, nTerms, std::mt19937::default_seed);
 
   printf("Total Terms = %lu\n", H.num_terms());
   auto kernel = [](const int n_qubits, const int layers,
@@ -74,13 +75,12 @@ TEST(MQPUTester, checkLarge) {
   };
 
   int nLayers = 2;
-  auto execParams =
-      cudaq::random_vector(-M_PI, M_PI, nQubits * (3 * nLayers + 2));
+  auto execParams = cudaq::random_vector(
+      -M_PI, M_PI, nQubits * (3 * nLayers + 2), std::mt19937::default_seed);
 
   std::vector<int> cnot_pairs(nQubits);
   std::iota(cnot_pairs.begin(), cnot_pairs.end(), 0);
-  std::random_device rd;
-  std::mt19937 g(rd());
+  std::mt19937 g{std::mt19937::default_seed + 1};
   std::shuffle(cnot_pairs.begin(), cnot_pairs.end(), g);
 
   auto t1 = std::chrono::high_resolution_clock::now();
@@ -89,4 +89,39 @@ TEST(MQPUTester, checkLarge) {
   auto t2 = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> ms_double = t2 - t1;
   printf("Time %lf s\n", ms_double.count() * 1e-3);
+}
+
+TEST(MQPUTester, checkAsyncWithKernelBuilder) {
+  auto [kernel, numIters] = cudaq::make_kernel<int>();
+  constexpr std::size_t numQubits = 1;
+  auto qubits = kernel.qalloc(numQubits);
+  auto theta = 0.2;
+  const auto rotateStep = [&](auto index) {
+    for (std::size_t i = 0; i < numQubits; ++i) {
+      kernel.rx(theta, qubits[i]);
+    };
+  };
+  kernel.for_loop(0, numIters, rotateStep);
+  auto &platform = cudaq::get_platform();
+  int numSteps = 1;
+  // Query the number of QPUs in the system
+  auto num_qpus = platform.num_qpus();
+  printf("Number of QPUs: %zu\n", num_qpus);
+  std::vector<cudaq::async_state_result> stateFutures;
+  // QPU 0: 1 step, QPU 1: 2 steps, etc.
+  for (std::size_t i = 0; i < num_qpus; i++) {
+    stateFutures.emplace_back(cudaq::get_state_async(i, kernel, numSteps));
+    numSteps++;
+  }
+
+  auto angle = 0.0;
+  for (auto &stateFutures : stateFutures) {
+    // Each run add 0.2 rad to the rotation
+    angle += 0.2;
+    const std::complex<double> expectedState[2] = {{std::cos(angle / 2), 0.0},
+                                                   {0.0, -std::sin(angle / 2)}};
+    auto gotState = stateFutures.get();
+    EXPECT_NEAR(std::abs(gotState[0] - expectedState[0]), 0.0, 1e-6);
+    EXPECT_NEAR(std::abs(gotState[1] - expectedState[1]), 0.0, 1e-6);
+  }
 }

@@ -157,6 +157,8 @@ CUDAQ_TEST(QubitQISTester, checkCommonKernel) {
   EXPECT_NEAR(energy, -1.7487, 1e-3);
 }
 
+#ifndef CUDAQ_BACKEND_TENSORNET_MPS
+// MPS doesn't support gates on more than 2 qubits
 CUDAQ_TEST(QubitQISTester, checkCtrlRegion) {
 
   auto ccnot = []() {
@@ -227,6 +229,7 @@ CUDAQ_TEST(QubitQISTester, checkCtrlRegion) {
   EXPECT_EQ(1, counts3.size());
   EXPECT_TRUE(counts3.begin()->first == "101");
 }
+#endif
 
 CUDAQ_TEST(QubitQISTester, checkAdjointRegions) {
   struct single_adjoint_test {
@@ -291,7 +294,7 @@ CUDAQ_TEST(QubitQISTester, checkAdjointRegions) {
   };
 
   struct test_adjoint {
-    void operator()(cudaq::qspan<> q) __qpu__ {
+    void operator()(cudaq::qview<> q) __qpu__ {
       h(q[0]);
       t(q[1]);
       s(q[2]);

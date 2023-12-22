@@ -6,14 +6,14 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-// RUN: nvq++ -v %s -o %basename_t.x --target quantinuum --emulate && ./%basename_t.x | FileCheck %s
-// XFAIL: *
+// RUN: nvq++ --target quantinuum --emulate -v %s -o %t && %t | FileCheck %s
+// RUN: nvq++ -std=c++17 --enable-mlir %s -o %t
 
 #include <cudaq.h>
 #include <iostream>
 
 __qpu__ void cccx_measure_cleanup() {
-  cudaq::qreg qubits(4);
+  cudaq::qvector qubits(4);
   // Initialize
   x(qubits[0]);
   x(qubits[1]);

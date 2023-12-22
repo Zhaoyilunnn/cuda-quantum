@@ -186,7 +186,13 @@ sample_result::sample_result(double preComputedExp,
 }
 
 void sample_result::append(ExecutionResult &result) {
-  sampleResults.insert({result.registerName, result});
+  // If given a result corresponding to the same register name,
+  // replace the existing one if in the map.
+  auto iter = sampleResults.find(result.registerName);
+  if (iter != sampleResults.end())
+    iter->second = result;
+  else
+    sampleResults.insert({result.registerName, result});
   if (!totalShots)
     for (auto &[bits, count] : result.counts)
       totalShots += count;
@@ -345,6 +351,28 @@ bool sample_result::has_expectation(const std::string_view registerName) {
   return iter->second.expectationValue.has_value();
 }
 
+double sample_result::expectation(const std::string_view registerName) {
+  double aver = 0.0;
+  auto iter = sampleResults.find(registerName.data());
+  if (iter == sampleResults.end())
+    return 0.0;
+
+  if (iter->second.expectationValue.has_value())
+    return iter->second.expectationValue.value();
+
+  auto counts = iter->second.counts;
+  for (auto &kv : counts) {
+    auto par = has_even_parity(kv.first);
+    auto p = probability(kv.first, registerName);
+    if (!par) {
+      p = -p;
+    }
+    aver += p;
+  }
+
+  return aver;
+}
+
 double sample_result::exp_val_z(const std::string_view registerName) {
   double aver = 0.0;
   auto iter = sampleResults.find(registerName.data());
@@ -461,5 +489,35 @@ void sample_result::dump() { dump(std::cout); }
 bool sample_result::has_even_parity(std::string_view bitString) {
   int c = std::count(bitString.begin(), bitString.end(), '1');
   return c % 2 == 0;
+}
+
+void sample_result::reorder(const std::vector<std::size_t> &idx,
+                            const std::string_view registerName) {
+  auto iter = sampleResults.find(registerName.data());
+  if (iter == sampleResults.end())
+    return;
+
+  // First process the counts
+  CountsDictionary newCounts;
+  for (auto [bits, count] : iter->second.counts) {
+    if (idx.size() != bits.size())
+      throw std::runtime_error("Calling reorder() with invalid parameter idx");
+
+    std::string newBits(bits);
+    int i = 0;
+    for (auto oldIdx : idx)
+      newBits[i++] = bits[oldIdx];
+    newCounts[newBits] = count;
+  }
+  iter->second.counts = newCounts;
+
+  // Now process the sequential data
+  for (auto &s : iter->second.sequentialData) {
+    std::string newBits(s);
+    int i = 0;
+    for (auto oldIdx : idx)
+      newBits[i++] = s[oldIdx];
+    s = newBits;
+  }
 }
 } // namespace cudaq

@@ -6,10 +6,11 @@
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
  ******************************************************************************/
 
-#include "CircuitSimulator.h"
-#include "Gates.h"
-#include "qpp.h"
+#include "nvqir/CircuitSimulator.h"
+#include "nvqir/Gates.h"
+
 #include <iostream>
+#include <qpp.h>
 #include <set>
 
 namespace nvqir {
@@ -51,23 +52,33 @@ protected:
       casted_qubit_indices.push_back(bigEndian(nQubitsAllocated, index));
     }
 
+    std::vector<double> resultVec;
     double result = 0.0;
     if constexpr (std::is_same_v<StateType, qpp::ket>) {
-#pragma omp parallel for reduction(+ : result)
+      resultVec.resize(stateDimension);
+#ifdef CUDAQ_HAS_OPENMP
+#pragma omp parallel for
+#endif
       for (std::size_t i = 0; i < stateDimension; ++i) {
-        result += (hasEvenParity(i, casted_qubit_indices) ? 1.0 : -1.0) *
-                  std::norm(state[i]);
+        resultVec[i] = (hasEvenParity(i, casted_qubit_indices) ? 1.0 : -1.0) *
+                       std::norm(state[i]);
       }
     } else if constexpr (std::is_same_v<StateType, qpp::cmat>) {
       Eigen::VectorXcd diag = state.diagonal();
-#pragma omp parallel for reduction(+ : result)
+      resultVec.resize(state.rows());
+#ifdef CUDAQ_HAS_OPENMP
+#pragma omp parallel for
+#endif
       for (Eigen::Index i = 0; i < state.rows(); i++) {
         auto element = diag(i).real();
         if (!hasEvenParity(i, casted_qubit_indices))
           element *= -1.;
-        result += element;
+        resultVec[i] = element;
       }
     }
+
+    // Accumulate outside the for loop to ensure repeatability
+    result = std::accumulate(resultVec.begin(), resultVec.end(), 0.0);
 
     return result;
   }
@@ -132,6 +143,10 @@ protected:
 
   void applyGate(const GateApplicationTask &task) override {
     auto matrix = toQppMatrix(task.matrix, task.targets.size());
+    if (task.controls.empty()) {
+      state = qpp::apply(state, matrix, task.targets);
+      return;
+    }
     state = qpp::applyCTRL(state, matrix, task.controls, task.targets);
   }
 

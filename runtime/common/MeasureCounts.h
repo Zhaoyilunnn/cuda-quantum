@@ -177,7 +177,11 @@ public:
 
   /// @brief Return the expected value <Z...Z>
   /// @return
-  double exp_val_z(const std::string_view registerName = GlobalRegisterName);
+  double expectation(const std::string_view registerName = GlobalRegisterName);
+  /// @brief Deprecated: Return the expected value <Z...Z>
+  [[deprecated("`exp_val_z()` is deprecated. Use `expectation()` with the same "
+               "argument structure.")]] double
+  exp_val_z(const std::string_view registerName = GlobalRegisterName);
 
   /// @brief Return the probability of observing the given bit string
   /// @param bitString
@@ -239,6 +243,12 @@ public:
   /// @return
   sample_result
   get_marginal(const std::vector<std::size_t> &marginalIndices,
+               const std::string_view registerName = GlobalRegisterName);
+
+  /// @brief Reorder the bits in an ExecutionResult
+  /// @param idx Vector of indices such that newBitStr(:) = oldBitStr(idx(:))
+  /// @param registerName register name to process (defaults to global)
+  void reorder(const std::vector<std::size_t> &idx,
                const std::string_view registerName = GlobalRegisterName);
 
   /// @brief Range-based iterator begin function

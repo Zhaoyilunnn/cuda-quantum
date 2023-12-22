@@ -20,7 +20,7 @@
 
 // Can define this as a free function since it is a pure device quantum kernel
 // (cannot be called from host code)
-__qpu__ void iqft(cudaq::qspan<> q) {
+__qpu__ void iqft(cudaq::qview<> q) {
   int N = q.size();
   // Swap qubits
   for (int i = 0; i < N / 2; ++i) {
@@ -42,7 +42,7 @@ __qpu__ void iqft(cudaq::qspan<> q) {
 // Define an oracle CUDA Quantum kernel
 struct tgate {
   // We do not own the qubits here, so just use a qspan.
-  void operator()(cudaq::qspan<> &q) __qpu__ { t(q); }
+  void operator()(cudaq::qview<> &q) __qpu__ { t(q); }
 };
 
 // CUDA Quantum Kernel call operators can be templated on input kernel
@@ -57,7 +57,7 @@ struct qpe {
   void operator()(const int nCountingQubits, const int nStateQubits,
                   StatePrep &&state_prep, Unitary &&oracle) __qpu__ {
     // Allocate a register of qubits
-    cudaq::qreg q(nCountingQubits + nStateQubits);
+    cudaq::qvector q(nCountingQubits + nStateQubits);
 
     // Extract sub-registers, one for the counting qubits another for the
     // eigenstate register
@@ -91,7 +91,7 @@ int main() {
   // Sample the QPE kernel for 3 counting qubits, 1 state qubit, a |1>
   // eigenstate preparation kernel, and a T gate unitary.
   auto counts = cudaq::sample(
-      qpe{}, 3, 1, [](cudaq::qspan<> &q) __qpu__ { x(q); }, tgate{});
+      qpe{}, 3, 1, [](cudaq::qview<> &q) __qpu__ { x(q); }, tgate{});
 
   // Fine grain access to the bits and counts
   for (auto &[bits, count] : counts) {
@@ -319,7 +319,7 @@ int main() {
 // CHECK:                     %[[VAL_47:.*]] = cc.load %[[VAL_36]] : !cc.ptr<i32>
 // CHECK:                     %[[VAL_48:.*]] = arith.extsi %[[VAL_47]] : i32 to i64
 // CHECK:                     %[[VAL_49:.*]] = quake.extract_ref %[[VAL_20]]{{\[}}%[[VAL_48]]] : (!quake.veq<?>, i64) -> !quake.ref
-// CHECK:                     quake.apply @__nvqpp__mlirgen__tgate{{\[}}%[[VAL_49]]] %[[VAL_26]] : (!quake.ref, !quake.veq<?>) -> ()
+// CHECK:                     quake.apply @__nvqpp__mlirgen__tgate [%[[VAL_49]]] %[[VAL_26]] : (!quake.ref, !quake.veq<?>) -> ()
 // CHECK:                     cc.continue
 // CHECK:                   } step {
 // CHECK:                     %[[VAL_50:.*]] = cc.load %[[VAL_40]] : !cc.ptr<i32>
@@ -336,7 +336,7 @@ int main() {
 // CHECK:             }
 // CHECK:           }
 // CHECK:           call @__nvqpp__mlirgen__function_iqft{{.*}}(%[[VAL_20]]) : (!quake.veq<?>) -> ()
-// CHECK:           %[[VAL_54:.*]] = quake.mz %[[VAL_20]] : (!quake.veq<?>) -> !cc.stdvec<i1>
+// CHECK:           %[[VAL_54:.*]] = quake.mz %[[VAL_20]] : (!quake.veq<?>) -> !cc.stdvec<!quake.measure>
 // CHECK:           return
 // CHECK:         }
 

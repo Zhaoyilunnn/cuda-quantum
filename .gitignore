@@ -87,6 +87,7 @@ Debug
 
 # third party integrations
 simulators/
+apps/
 
 # macOS
 .DS_Store

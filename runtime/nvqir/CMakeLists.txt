@@ -23,6 +23,8 @@ target_include_directories(${LIBRARY_NAME}
          $<INSTALL_INTERFACE:include> 
   PRIVATE .)
 
+set_property(GLOBAL APPEND PROPERTY CUDAQ_RUNTIME_LIBS ${LIBRARY_NAME})
+
 # Private link to nvqir-qpp, it will always be here, 
 # and by keeping it private, others can specify the
 # backend library later on
@@ -39,6 +41,9 @@ add_subdirectory(qpp)
 if (CUSTATEVEC_ROOT AND CUDA_FOUND) 
   add_subdirectory(custatevec)
 endif() 
+if (CUTENSORNET_ROOT AND CUDA_FOUND)
+  add_subdirectory(cutensornet)  
+endif()
 
 install(EXPORT nvqir-targets
         FILE NVQIRTargets.cmake

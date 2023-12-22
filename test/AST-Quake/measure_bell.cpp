@@ -15,7 +15,7 @@
 
 struct bell {
   void operator()(int num_iters) __qpu__ {
-    cudaq::qreg q(2);
+    cudaq::qvector q(2);
     int n = 0;
     for (int i = 0; i < num_iters; i++) {
       h(q[0]);
@@ -52,7 +52,8 @@ struct bell {
 // CHECK:               quake.h %[[VAL_10]] : (!quake.ref) -> ()
 // CHECK:               %[[VAL_11:.*]] = quake.extract_ref %[[VAL_4]][1] : (!quake.veq<2>) -> !quake.ref
 // CHECK:               quake.x {{\[}}%[[VAL_10]]] %[[VAL_11]] : (!quake.ref, !quake.ref) -> ()
-// CHECK:               %[[VAL_12:.*]] = quake.mz %[[VAL_4]] : (!quake.veq<2>) -> !cc.stdvec<i1>
+// CHECK:               %[[VAL_112:.*]] = quake.mz %[[VAL_4]] name "results" : (!quake.veq<2>) -> !cc.stdvec<!quake.measure>
+// CHECK:               %[[VAL_12:.*]] = quake.discriminate %[[VAL_112]] :
 // CHECK:               %[[VAL_13:.*]] = cc.stdvec_data %[[VAL_12]] : (!cc.stdvec<i1>) -> !cc.ptr<i1>
 // CHECK:               %[[VAL_14:.*]] = cc.compute_ptr %[[VAL_13]][0] : (!cc.ptr<i1>) -> !cc.ptr<i1>
 // CHECK:               %[[VAL_15:.*]] = cc.load %[[VAL_14]] : !cc.ptr<i1>
@@ -80,7 +81,7 @@ struct bell {
 
 struct libertybell {
   void operator()(int num_iters) __qpu__ {
-    cudaq::qreg q(2);
+    cudaq::qvector q(2);
     int n = 0;
     for (int i = 0; i < num_iters; i++) {
       h(q[0]);
@@ -116,7 +117,8 @@ struct libertybell {
 // CHECK:               quake.h %[[VAL_10]] : (!quake.ref) -> ()
 // CHECK:               %[[VAL_11:.*]] = quake.extract_ref %[[VAL_4]][1] : (!quake.veq<2>) -> !quake.ref
 // CHECK:               quake.x {{\[}}%[[VAL_10]]] %[[VAL_11]] : (!quake.ref, !quake.ref) -> ()
-// CHECK:               %[[VAL_12:.*]] = quake.mz %[[VAL_4]] : (!quake.veq<2>) -> !cc.stdvec<i1>
+// CHECK:               %[[VAL_112:.*]] = quake.mz %[[VAL_4]] name "results" : (!quake.veq<2>) -> !cc.stdvec<!quake.measure>
+// CHECK:               %[[VAL_12:.*]] = quake.discriminate %[[VAL_112]] :
 // CHECK:               %[[VAL_13:.*]] = cc.stdvec_data %[[VAL_12]] : (!cc.stdvec<i1>) -> !cc.ptr<i1>
 // CHECK:               %[[VAL_14:.*]] = cc.compute_ptr %[[VAL_13]][0] : (!cc.ptr<i1>) -> !cc.ptr<i1>
 // CHECK-DAG:           %[[VAL_15:.*]] = cc.compute_ptr %[[VAL_13]][1] : (!cc.ptr<i1>) -> !cc.ptr<i1>
@@ -141,7 +143,7 @@ struct libertybell {
 
 struct tinkerbell {
   void operator()(int num_iters) __qpu__ {
-    cudaq::qreg q(2);
+    cudaq::qvector q(2);
     int n = 0;
     for (int i = 0; i < num_iters; i++) {
       h(q[0]);
@@ -179,7 +181,8 @@ struct tinkerbell {
 // CHECK:               quake.h %[[VAL_10]] : (!quake.ref) -> ()
 // CHECK:               %[[VAL_11:.*]] = quake.extract_ref %[[VAL_4]][1] : (!quake.veq<2>) -> !quake.ref
 // CHECK:               quake.x {{\[}}%[[VAL_10]]] %[[VAL_11]] : (!quake.ref, !quake.ref) -> ()
-// CHECK:               %[[VAL_12:.*]] = quake.mz %[[VAL_4]] : (!quake.veq<2>) -> !cc.stdvec<i1>
+// CHECK:               %[[VAL_112:.*]] = quake.mz %[[VAL_4]] name "results" : (!quake.veq<2>) -> !cc.stdvec<!quake.measure>
+// CHECK:               %[[VAL_12:.*]] = quake.discriminate %[[VAL_112]] :
 // CHECK:               %[[VAL_13:.*]] = cc.stdvec_data %[[VAL_12]] : (!cc.stdvec<i1>) -> !cc.ptr<i1>
 // CHECK:               %[[VAL_14:.*]] = cc.compute_ptr %[[VAL_13]][0] : (!cc.ptr<i1>) -> !cc.ptr<i1>
 // CHECK-DAG:           %[[VAL_15:.*]] = cc.compute_ptr %[[VAL_13]][1] : (!cc.ptr<i1>) -> !cc.ptr<i1>

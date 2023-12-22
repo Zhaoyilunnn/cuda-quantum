@@ -10,7 +10,7 @@
 
 #include "common/NoiseModel.h"
 #include "cudaq/qis/qubit_qis.h"
-
+#include "host_config.h"
 #include <string>
 #include <type_traits>
 
@@ -118,9 +118,16 @@ std::string get_kernel_template_function_name(const std::string &funcName) {
 
 /// These get_quake overloads can be used for introspection, to look up the
 /// Quake IR for a specific kernel by providing an instance of the kernel, etc.
+#if CUDAQ_USE_STD20
 template <typename MemberArg0, typename... MemberArgs, typename QuantumKernel,
           std::enable_if_t<std::is_class_v<std::remove_cvref_t<QuantumKernel>>,
                            bool> = true>
+#else
+template <typename MemberArg0, typename... MemberArgs, typename QuantumKernel,
+          std::enable_if_t<std::is_class_v<std::remove_cv_t<
+                               std::remove_reference_t<QuantumKernel>>>,
+                           bool> = true>
+#endif
 std::string get_quake(QuantumKernel &&kernel) {
   // See comment below.
   if (__internal__::globalFalse) {
@@ -135,9 +142,16 @@ std::string get_quake(QuantumKernel &&kernel) {
                                       MemberArgs...>());
 }
 
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel,
           std::enable_if_t<std::is_class_v<std::remove_cvref_t<QuantumKernel>>,
                            bool> = true>
+#else
+template <typename QuantumKernel,
+          std::enable_if_t<std::is_class_v<std::remove_cv_t<
+                               std::remove_reference_t<QuantumKernel>>>,
+                           bool> = true>
+#endif
 std::string get_quake(QuantumKernel &&kernel) {
   if constexpr (hasToQuakeMethod<QuantumKernel>::value) {
     return kernel.to_quake();
@@ -172,34 +186,39 @@ inline std::string get_quake(std::string &&functionName) {
 typedef std::size_t (*KernelArgsCreator)(void **, void **);
 KernelArgsCreator getArgsCreator(const std::string &kernelName);
 
-/// @brief
-/// @return
 bool kernelHasConditionalFeedback(const std::string &kernelName);
 
 /// @brief Provide a hook to set the target backend.
 void set_target_backend(const char *backend);
 
 /// @brief Utility function for setting the shots on the platform
-void set_shots(const std::size_t nShots);
+[[deprecated("Specify the number of shots in the using the overloaded sample() "
+             "and observe() functions")]] void
+set_shots(const std::size_t nShots);
 
-/// @brief Set a custom noise model for simulation
-void set_noise(cudaq::noise_model &model);
+/// @brief Set a custom noise model for simulation. The caller must also call
+/// `cudaq::unset_noise` before `model` gets deallocated or goes out of scope.
+void set_noise(const cudaq::noise_model &model);
 
 /// @brief Remove an existing noise model from simulation.
 void unset_noise();
 
 /// @brief Utility function for clearing the shots
-void clear_shots(const std::size_t nShots);
+[[deprecated("Specify the number of shots in the using the overloaded sample() "
+             "and observe() functions")]] void
+clear_shots(const std::size_t nShots);
 
 /// @brief Set a seed for any random number
 /// generators used in backend simulations.
 void set_random_seed(std::size_t seed);
 
+/// @brief Get a previously set random seed
+std::size_t get_random_seed();
+
 /// @brief The number of available GPUs.
 int num_available_gpus();
 
 namespace mpi {
-
 /// @brief Initialize MPI if available. This function
 /// is a no-op if there CUDA Quantum has not been built
 /// against MPI.
@@ -237,10 +256,22 @@ T all_reduce(const T &localValue, const BinaryFunction &function) {
   return details::allReduce(localValue, function);
 }
 
-/// @brief Gather all vector data locally into the provided
-/// global vector. Global vector must be sized to fit all
+/// @brief Gather all vector data (floating point numbers) locally into the
+/// provided global vector.
+///
+/// Global vector must be sized to fit all vector
+/// elements coming from individual ranks.
+void all_gather(std::vector<double> &global, const std::vector<double> &local);
+
+/// @brief Gather all vector data (integers) locally into the provided
+/// global vector.
+///
+/// Global vector must be sized to fit all
 /// vector elements coming from individual ranks.
-void all_gather(std::vector<double> &global, std::vector<double> &local);
+void all_gather(std::vector<int> &global, const std::vector<int> &local);
+
+/// @brief Broadcast a vector from a process (rootRank) to all other processes.
+void broadcast(std::vector<double> &data, int rootRank);
 
 /// @brief Finalize MPI. This function
 /// is a no-op if there CUDA Quantum has not been built

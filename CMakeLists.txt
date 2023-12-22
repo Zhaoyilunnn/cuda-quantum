@@ -37,6 +37,13 @@ if(POLICY CMP0116)
   cmake_policy(SET CMP0116 OLD)
 endif()
 
+# CMP0148: The ``FindPythonInterp`` and ``FindPythonLibs`` modules are removed.
+# CMake 3.27 and above no longer provide the modules.
+# https://cmake.org/cmake/help/latest/policy/CMP0148.html
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 OLD)
+endif()
+
 # Project setup
 # ==============================================================================
 project(cudaq LANGUAGES CXX C)
@@ -93,6 +100,19 @@ if(GIT_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
     if(NOT GIT_SUBMOD_RESULT EQUAL "0")
         message(FATAL_ERROR "Cloning git submodules failed with ${GIT_SUBMOD_RESULT}, please checkout submodules manually")
     endif()
+    # Apply patches; check if patch is already applied first, and apply it if not
+    execute_process(COMMAND ${GIT_EXECUTABLE} -C tpls/pybind11/ apply ../customizations/pybind11/pybind.h.diff --reverse --check
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    RESULT_VARIABLE GIT_PATCH_RESULT
+                    ERROR_QUIET)
+    if(NOT GIT_PATCH_RESULT EQUAL "0")
+      execute_process(COMMAND ${GIT_EXECUTABLE} -C tpls/pybind11/ apply ../customizations/pybind11/pybind.h.diff
+                      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                      RESULT_VARIABLE GIT_PATCH_RESULT)
+    endif()
+    if(NOT GIT_PATCH_RESULT EQUAL "0")
+        message(FATAL_ERROR "Applying patch to submodule failed with ${GIT_PATCH_RESULT}, please update patch")
+    endif()
   endif()
 endif()
 
@@ -122,8 +142,15 @@ endif()
 if(NOT CUSTATEVEC_ROOT)
   SET(CUSTATEVEC_ROOT "$ENV{CUQUANTUM_INSTALL_PREFIX}")
 endif()
+if(NOT CUTENSORNET_ROOT)
+  SET(CUTENSORNET_ROOT "$ENV{CUQUANTUM_INSTALL_PREFIX}")
+endif()
 if(NOT OPENSSL_ROOT_DIR)	
   SET(OPENSSL_ROOT_DIR "$ENV{OPENSSL_INSTALL_PREFIX}")	
+endif()
+if(NOT BLAS_LIBRARIES AND EXISTS "$ENV{BLAS_INSTALL_PREFIX}/libblas.a")
+  # CACHE INTERNAL is needed due to how FindBLAS.cmake works...
+  SET(BLAS_LIBRARIES "$ENV{BLAS_INSTALL_PREFIX}/libblas.a" CACHE INTERNAL "")	
 endif()
 
 SET(CMAKE_SKIP_BUILD_RPATH FALSE)
@@ -339,10 +366,32 @@ configure_file("${CMAKE_SOURCE_DIR}/include/nvqpp_config.h.in"
 install(FILES ${CMAKE_BINARY_DIR}/include/nvqpp_config.h
   DESTINATION include/nvqpp)
 
+# Check optional dependencies
+# ==============================================================================
+find_package(OpenMP)
+find_package(OpenSSL)
+
+if (NOT CUDAQ_SKIP_MPI)
+  find_package(MPI COMPONENTS CXX)
+  if (MPI_FOUND)
+    message(STATUS "MPI CXX Found: ${MPIEXEC}")
+    # Build the built-in MPI Comm plugin
+    add_subdirectory(runtime/cudaq/distributed/builtin)
+  endif()
+endif()
+
 # Third-party libraries (tpls)
 # ==============================================================================
 set(FMT_INSTALL ON)
+cmake_policy(PUSH)
+# CMP0146: The FindCUDA module is removed.
+# CMake 3.27 and above no longer provide the modules.
+# https://cmake.org/cmake/help/latest/policy/CMP0146.html
+if(POLICY CMP0146)
+  cmake_policy(SET CMP0146 OLD)
+endif()
 add_subdirectory(tpls/fmt)
+cmake_policy(POP)
 include_directories(SYSTEM tpls/json/include)
 
 # Add spdlog 
@@ -352,16 +401,51 @@ add_subdirectory(tpls/spdlog)
 set_property(TARGET spdlog APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES)
 target_compile_options(spdlog PRIVATE -Wno-covered-switch-default)
 
+# QPP simulator
+if (NOT CUDAQ_DISABLE_RUNTIME)
+  add_subdirectory(tpls/qpp EXCLUDE_FROM_ALL)
+  # Required workaround to add libqpp as SYSTEM. This will prevent it from
+  # generating warnings, which we treat as errors.
+  get_target_property(LIBQPP_INCLUDE libqpp INTERFACE_INCLUDE_DIRECTORIES)
+  set_target_properties(libqpp
+    PROPERTIES
+      INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${LIBQPP_INCLUDE}")
+  if (OpenMP_CXX_FOUND)
+    target_compile_definitions(libqpp INTERFACE HAS_OPENMP)
+  endif()
+endif()
+
+
 # Check for CUDA Support
 # ==============================================================================
 include(CheckLanguage)
 check_language(CUDA)
 set(CUDA_FOUND FALSE)
+# Generate -gencode arch=compute_XX,code=sm_XX for list of supported
+# arch values.
+# List should be sorted in increasing order.
+function(CUDA_get_gencode_args out_args_string arch_values)
+  # allow the user to pass the list like a normal variable
+  set(arch_list ${arch_values} ${ARGN})
+  set(out "")
+  foreach(arch IN LISTS arch_list)
+    set(out "${out} -gencode arch=compute_${arch},code=sm_${arch}")
+  endforeach(arch)
+
+  # Repeat the last one as to ensure the generation of PTX for most
+  # recent virtual architecture for forward compatibility
+  list(GET arch_list -1 last_arch)
+  set(out "${out} -gencode arch=compute_${last_arch},code=compute_${last_arch}")
+  set(${out_args_string} ${out} PARENT_SCOPE)
+endfunction()
+
 if(CMAKE_CUDA_COMPILER)
-  if (NOT CUDA_ARCH_BIN)
-    set(CUDA_ARCH_BIN 80)
+  if (NOT CUDA_TARGET_ARCHS)
+    # Volta, Ampere, Hopper
+    set(CUDA_TARGET_ARCHS  "70;80;90")
   endif()
-  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -shared -std=c++17 -gencode arch=compute_${CUDA_ARCH_BIN},code=sm_${CUDA_ARCH_BIN}  --compiler-options -fPIC")
+  CUDA_get_gencode_args(CUDA_gencode_flags ${CUDA_TARGET_ARCHS})
+  set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -shared -std=c++17 ${CUDA_gencode_flags} --compiler-options -fPIC")
 
   enable_language(CUDA)
   set(CUDA_FOUND TRUE)
@@ -370,16 +454,6 @@ if(CMAKE_CUDA_COMPILER)
   message(STATUS "Cuda language found.")
 endif()
 
-# Check for OpenSSL
-find_package(OpenSSL)
-
-# Optionally build with MPI
-if (NOT CUDAQ_SKIP_MPI)
-  find_package(MPI COMPONENTS CXX)
-  if (MPI_FOUND) 
-    message(STATUS "MPI CXX Found: ${MPIEXEC}")
-  endif()
-endif()
 
 # Directory setup
 # ==============================================================================
@@ -410,7 +484,7 @@ if(CUDAQ_BUILD_TESTS)
     AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0.0)
     target_compile_options(gtest PUBLIC --param=evrp-mode=legacy)
   endif()
-  if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  if (CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$")
     target_compile_options(gtest PUBLIC -Wno-covered-switch-default)
   endif()
   include(GoogleTest)

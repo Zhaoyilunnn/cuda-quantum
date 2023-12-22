@@ -12,7 +12,7 @@
 
 struct bad {
   int operator()(int i) __qpu__ {
-    cudaq::qreg q(i);
+    cudaq::qvector q(i);
     h(q);
     mz(q);
     return i;
@@ -26,6 +26,7 @@ struct bad {
 // expected-note@* {{}}
 // expected-note@* {{}}
 // expected-note@* {{}}
+// expected-note@* 2 {{requires 3 arguments, but 2 were provided}}
 
 int main() {
     cudaq::sample(bad{}, 5); // expected-error {{no matching function for call to}}

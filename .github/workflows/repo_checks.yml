@@ -16,7 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Markdown files
+      - name: Convert reStructuredText files to Markdown
+        run: |
+          pip install "rst-to-myst[sphinx]==0.4.0"
+          find docs/sphinx/ -type f -name "*.rst" -print0 | xargs -0 rst2myst convert --raise-on-warning
+
+      - name: Check links in Markdown files
         uses: gaurav-nelson/github-action-markdown-link-check@v1
         with:
           use-verbose-mode: "yes"
@@ -225,11 +230,12 @@ jobs:
 
           md_status=`create_summary Markdown markdown`
           rst_status=`create_summary reStructuredText rst`
-          cxx_status=`create_summary "C++ Headers" cxx_headers`
-          cxx_status=`create_summary "C++ Examples" cxx_examples`
+          cxx_h_status=`create_summary "C++ Headers" cxx_headers`
+          cxx_ex_status=`create_summary "C++ Examples" cxx_examples`
           py_status=`create_summary Python python`
 
           if [ ! "$md_status" -eq 0 ]; then exit 1; fi
           if [ ! "$rst_status" -eq 0 ]; then exit 2; fi
-          if [ ! "$cxx_status" -eq 0 ]; then exit 3; fi
-          if [ ! "$py_status" -eq 0 ]; then exit 4; fi
+          if [ ! "$cxx_h_status" -eq 0 ]; then exit 3; fi
+          if [ ! "$cxx_ex_status" -eq 0 ]; then exit 4; fi
+          if [ ! "$py_status" -eq 0 ]; then exit 5; fi

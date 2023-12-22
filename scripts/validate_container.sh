@@ -46,9 +46,14 @@ available_backends=`\
     echo "default"
     for file in $(ls $CUDA_QUANTUM_PATH/targets/*.config); \
     do
+        libEM=$(cat $file | grep "LIBRARY_MODE_EXECUTION_MANAGER=")
+        if grep -q "LIBRARY_MODE_EXECUTION_MANAGER=" $file ; then 
+          continue
+        fi 
         platform=$(cat $file | grep "PLATFORM_QPU=")
-        if [ "${platform#PLATFORM_QPU=}" != "remote_rest" ] \
-           && ($gpu_available || [ "$(cat $file | grep "GPU_REQUIREMENTS")" == "" ]); then \
+        qpu=${platform#PLATFORM_QPU=}
+        if [ "${qpu}" != "remote_rest" ] && [ "${qpu}" != "orca" ] \
+        && ($gpu_available || [ -z "$(cat $file | grep "GPU_REQUIREMENTS")" ]); then \
             basename $file | cut -d "." -f 1; \
         fi; \
     done`
@@ -98,12 +103,12 @@ do
     echo "Source: $ex"
     let "samples+=1"
 
-    if [[ "$ex" == *"ionq"* ]] || [[ "$ex" == *"quantinuum"* ]];
-    then 
+    if [[ "$ex" == *"iqm"* ]] || [[ "$ex" == *"ionq"* ]] || [[ "$ex" == *"quantinuum"* ]];
+    then
         let "skipped+=1"
         echo "Skipped.";
     else
-        python $ex 1> /dev/null
+        python3 $ex 1> /dev/null
         status=$?
         echo "Exited with code $status"
         if [ "$status" -eq "0" ]; then 
@@ -126,30 +131,23 @@ do
     echo "Testing $filename:"
     echo "Source: $ex"
     let "samples+=1"
+
+    # Look for a --target flag to nvq++ in the 
+    # comment block at the beginning of the file.
+    intended_target=`sed -e '/^$/,$d' $ex | grep -oP '^//\s*nvq++.+--target\s+\K\S+'`
+
     for t in $requested_backends
     do
-        if [[ "$ex" == *"ionq"* ]] || [[ "$ex" == *"quantinuum"* ]];
-        then 
-            let "skipped+=1"
-            echo "Skipping $t target.";
-
-        elif [[ "$ex" == *"cuquantum"* ]];
-        then 
-            let "skipped+=1"
-            echo "Skipping $t target.";
-
-        elif [[ "$ex" != *"nois"* ]] && [ "$t" == "density-matrix-cpu" ];
+        if [ -n "$intended_target" ] && [ "$intended_target" != "$t" ];
         then
             let "skipped+=1"
-            echo "Skipping $t target."
+            echo "Skipping $t target.";
 
         else
             echo "Testing on $t target..."
             if [ "$t" == "default" ]; then 
                 nvq++ $ex
-                dummy=1
             else
-                dummy=1
                 nvq++ $ex --target $t
             fi
             ./a.out &> /dev/null

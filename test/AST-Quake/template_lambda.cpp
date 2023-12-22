@@ -17,7 +17,7 @@ struct thisWorks {
 struct test {
   template <typename Callable>
   void operator()(Callable &&callable) __qpu__ {
-    cudaq::qreg q(2);
+    cudaq::qvector q(2);
     cudaq::control(callable, q[0], q[1]);
   }
 };
@@ -37,6 +37,6 @@ int main() {
 // CHECK:           %[[VAL_3:.*]] = quake.alloca !quake.veq<2>
 // CHECK:           %[[VAL_6:.*]] = quake.extract_ref %{{.*}}[0] : (!quake.veq<2>) -> !quake.ref
 // CHECK:           %[[VAL_9:.*]] = quake.extract_ref %{{.*}}[1] : (!quake.veq<2>) -> !quake.ref
-// CHECK:           quake.apply @__nvqpp__mlirgen__Z4mainE3$_0[%[[VAL_6]]] %[[VAL_9]] : (!quake.ref, !quake.ref) -> ()
+// CHECK:           quake.apply @__nvqpp__mlirgen__Z4mainE3$_0 [%[[VAL_6]]] %[[VAL_9]] : (!quake.ref, !quake.ref) -> ()
 // CHECK:           return
 

@@ -7,6 +7,8 @@
  ******************************************************************************/
 
 #include "DecompositionPatterns.h"
+#include "cudaq/Optimizer/Builder/Factory.h"
+#include "cudaq/Optimizer/Dialect/CC/CCOps.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -22,14 +24,13 @@ namespace {
 
 inline Value createConstant(Location loc, double value, Type type,
                             PatternRewriter &rewriter) {
-  return rewriter.create<arith::ConstantFloatOp>(loc, llvm::APFloat(value),
-                                                 cast<FloatType>(type));
+  auto fltTy = cast<FloatType>(type);
+  return cudaq::opt::factory::createFloatConstant(loc, rewriter, value, fltTy);
 }
 
-inline Value createConstant(Location loc, size_t value,
+inline Value createConstant(Location loc, std::size_t value,
                             PatternRewriter &rewriter) {
-  return rewriter.create<arith::ConstantIntOp>(loc, value,
-                                               rewriter.getI64Type());
+  return cudaq::opt::factory::createI64Constant(loc, rewriter, value);
 }
 
 inline Value createDivF(Location loc, Value numerator, double denominator,
@@ -44,13 +45,13 @@ inline Value createDivF(Location loc, Value numerator, double denominator,
 /// Note: This function assumes that the operation has already been tested for
 /// reference semantics.
 LogicalResult checkNumControls(quake::OperatorInterface op,
-                               size_t requiredNumControls) {
+                               std::size_t requiredNumControls) {
   auto opControls = op.getControls();
   if (opControls.size() > requiredNumControls)
     return failure();
 
   // Compute the number of controls
-  size_t numControls = 0;
+  std::size_t numControls = 0;
   for (auto control : opControls) {
     if (auto veq = dyn_cast<quake::VeqType>(control.getType())) {
       if (!veq.hasSpecifiedSize())
@@ -77,10 +78,10 @@ LogicalResult checkAndExtractControls(quake::OperatorInterface op,
   if (failed(checkNumControls(op, controls.size())))
     return failure();
 
-  size_t controlIndex = 0;
+  std::size_t controlIndex = 0;
   for (Value control : op.getControls()) {
     if (auto veq = dyn_cast<quake::VeqType>(control.getType())) {
-      for (size_t i = 0, end = veq.getSize(); i < end; ++i) {
+      for (std::size_t i = 0, end = veq.getSize(); i < end; ++i) {
         Value index = createConstant(op.getLoc(), i, rewriter);
         Value qref =
             rewriter.create<quake::ExtractRefOp>(op.getLoc(), control, index);
@@ -133,6 +134,89 @@ struct HToPhasedRx : public OpRewritePattern<quake::HOp> {
     rewriter.create<quake::PhasedRxOp>(loc, parameters, noControls, target);
 
     rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// quake.exp_pauli(theta) target pauliWord
+// ───────────────────────────────────
+// Basis change operations, cnots, rz(theta), adjoint basis change
+struct ExpPauliDecomposition : public OpRewritePattern<quake::ExpPauliOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  void initialize() { setDebugName("ExpPauliDecomposition"); }
+
+  LogicalResult matchAndRewrite(quake::ExpPauliOp expPauliOp,
+                                PatternRewriter &rewriter) const override {
+    auto loc = expPauliOp.getLoc();
+    auto qubits = expPauliOp.getQubits();
+    auto theta = expPauliOp.getParameter();
+    auto pauliWord = expPauliOp.getPauli();
+
+    // Assert that we have a constant known pauli word
+    auto defOp = pauliWord.getDefiningOp<cudaq::cc::CreateStringLiteralOp>();
+    if (!defOp)
+      return failure();
+
+    SmallVector<Value> qubitSupport;
+    StringRef pauliWordStr = defOp.getStringLiteral();
+    for (std::size_t i = 0; i < pauliWordStr.size(); i++) {
+      Value index = rewriter.create<arith::ConstantIntOp>(loc, i, 64);
+      Value qubitI = rewriter.create<quake::ExtractRefOp>(loc, qubits, index);
+      if (pauliWordStr[i] != 'I')
+        qubitSupport.push_back(qubitI);
+
+      if (pauliWordStr[i] == 'Y') {
+        APFloat d(M_PI_2);
+        Value param = rewriter.create<arith::ConstantFloatOp>(
+            loc, d, rewriter.getF64Type());
+        rewriter.create<quake::RxOp>(loc, ValueRange{param}, ValueRange{},
+                                     ValueRange{qubitI});
+      } else if (pauliWordStr[i] == 'X') {
+        rewriter.create<quake::HOp>(loc, ValueRange{qubitI});
+      }
+    }
+
+    // If qubitSupport is empty, then we can safely drop the
+    // operation since it will only add a global phase.
+    // FIXME this should be tracked in the IR at some point
+    if (qubitSupport.empty()) {
+      rewriter.eraseOp(expPauliOp);
+      return success();
+    }
+
+    std::vector<std::pair<Value, Value>> toReverse;
+    for (std::size_t i = 0; i < qubitSupport.size() - 1; i++) {
+      rewriter.create<quake::XOp>(loc, ValueRange{qubitSupport[i]},
+                                  ValueRange{qubitSupport[i + 1]});
+      toReverse.emplace_back(qubitSupport[i], qubitSupport[i + 1]);
+    }
+
+    rewriter.create<quake::RzOp>(loc, ValueRange{theta}, ValueRange{},
+                                 ValueRange{qubitSupport.back()});
+
+    std::reverse(toReverse.begin(), toReverse.end());
+    for (auto &[i, j] : toReverse)
+      rewriter.create<quake::XOp>(loc, ValueRange{i}, ValueRange{j});
+
+    for (std::size_t i = 0; i < pauliWordStr.size(); i++) {
+      std::size_t k = pauliWordStr.size() - 1 - i;
+      Value index = rewriter.create<arith::ConstantIntOp>(loc, k, 64);
+      Value qubitK = rewriter.create<quake::ExtractRefOp>(loc, qubits, index);
+
+      if (pauliWordStr[k] == 'Y') {
+        APFloat d(-M_PI_2);
+        Value param = rewriter.create<arith::ConstantFloatOp>(
+            loc, d, rewriter.getF64Type());
+        rewriter.create<quake::RxOp>(loc, ValueRange{param}, ValueRange{},
+                                     ValueRange{qubitK});
+      } else if (pauliWordStr[k] == 'X') {
+        rewriter.create<quake::HOp>(loc, ValueRange{qubitK});
+      }
+    }
+
+    rewriter.eraseOp(expPauliOp);
+
     return success();
   }
 };
@@ -269,6 +353,32 @@ struct SToPhasedRx : public OpRewritePattern<quake::SOp> {
   }
 };
 
+// quake.s [control] target
+// ────────────────────────────────────
+// quake.r1(π/2) [control] target
+//
+// Adding this gate equivalence will enable further decomposition via other
+// patterns such as controlled-r1 to cnot.
+struct SToR1 : public OpRewritePattern<quake::SOp> {
+  using OpRewritePattern<quake::SOp>::OpRewritePattern;
+
+  void initialize() { setDebugName("SToR1"); }
+
+  LogicalResult matchAndRewrite(quake::SOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!quake::isAllReferences(op))
+      return failure();
+
+    // Op info
+    auto loc = op->getLoc();
+    auto angle = createConstant(loc, op.isAdj() ? -M_PI_2 : M_PI_2,
+                                rewriter.getF64Type(), rewriter);
+    rewriter.create<quake::R1Op>(loc, angle, op.getControls(), op.getTarget());
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 //===----------------------------------------------------------------------===//
 // TOp decompositions
 //===----------------------------------------------------------------------===//
@@ -312,6 +422,32 @@ struct TToPhasedRx : public OpRewritePattern<quake::TOp> {
     parameters[1] = zero;
     rewriter.create<quake::PhasedRxOp>(loc, parameters, noControls, target);
 
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+// quake.t [control] target
+// ────────────────────────────────────
+// quake.r1(π/4) [control] target
+//
+// Adding this gate equivalence will enable further decomposition via other
+// patterns such as controlled-r1 to cnot.
+struct TToR1 : public OpRewritePattern<quake::TOp> {
+  using OpRewritePattern<quake::TOp>::OpRewritePattern;
+
+  void initialize() { setDebugName("TToR1"); }
+
+  LogicalResult matchAndRewrite(quake::TOp op,
+                                PatternRewriter &rewriter) const override {
+    if (!quake::isAllReferences(op))
+      return failure();
+
+    // Op info
+    auto loc = op->getLoc();
+    auto angle = createConstant(loc, op.isAdj() ? -M_PI_4 : M_PI_4,
+                                rewriter.getF64Type(), rewriter);
+    rewriter.create<quake::R1Op>(loc, angle, op.getControls(), op.getTarget());
     rewriter.eraseOp(op);
     return success();
   }
@@ -1005,8 +1141,10 @@ void cudaq::populateWithAllDecompositionPatterns(RewritePatternSet &patterns) {
     CHToCX,
     // SOp patterns
     SToPhasedRx,
+    SToR1,
     // TOp patterns
     TToPhasedRx,
+    TToR1,
     // XOp patterns
     CXToCZ,
     CCXToCCZ,
@@ -1031,7 +1169,8 @@ void cudaq::populateWithAllDecompositionPatterns(RewritePatternSet &patterns) {
     CRzToCX,
     RzToPhasedRx,
     // Swap
-    SwapToCX
+    SwapToCX,
+    ExpPauliDecomposition
   >(patterns.getContext());
   // clang-format on
 }

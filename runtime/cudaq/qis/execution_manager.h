@@ -29,6 +29,9 @@ struct QuditInfo {
   std::size_t id = 0;
   QuditInfo(const std::size_t &_levels, const std::size_t &_id)
       : levels(_levels), id(_id) {}
+  bool operator==(const QuditInfo &other) {
+    return levels == other.levels && id == other.id;
+  }
 };
 
 bool __nvqpp__MeasureResultBoolConversion(int);
@@ -38,7 +41,7 @@ bool __nvqpp__MeasureResultBoolConversion(int);
 /// @brief In library mode, we model the return type of
 /// a qubit measurement result via the measure_result type.
 /// This allows us to keep track of when the result is
-/// implicitly casted to a bool (likely in the case of
+/// implicitly cast to a boolean (likely in the case of
 /// conditional feedback), and affect the simulation accordingly
 class measure_result {
 private:
@@ -63,7 +66,7 @@ using measure_result = bool;
 /// The ExecutionManager provides a base class describing a
 /// concrete sub-system for allocating qudits and executing quantum
 /// instructions on those qudits. This type is templated on the concrete
-/// qudit type (qubit, qmode, etc). It exposes an API for getting an
+/// qudit type (`qubit`, `qmode`, etc). It exposes an API for getting an
 /// available qudit id, returning that id, setting and resetting the
 /// current execution context, and applying specific quantum instructions.
 class ExecutionManager {
@@ -105,11 +108,13 @@ public:
 
   /// Apply the quantum instruction with the given name, on the provided
   /// target qudits. Supports input of control qudits and rotational parameters.
+  /// Can also optionally take a spin_op as input to affect a general
+  /// Pauli rotation.
   virtual void apply(const std::string_view gateName,
                      const std::vector<double> &params,
                      const std::vector<QuditInfo> &controls,
                      const std::vector<QuditInfo> &targets,
-                     bool isAdjoint = false) = 0;
+                     bool isAdjoint = false, const spin_op op = spin_op()) = 0;
 
   /// Reset the qubit to the |0> state
   virtual void reset(const QuditInfo &target) = 0;
@@ -130,7 +135,7 @@ public:
   /// e.g. for qubits, this can return 0 or 1;
   virtual int measure(const QuditInfo &target) = 0;
 
-  /// Measure the current state in the given pauli basis, return
+  /// Measure the current state in the given Pauli basis, return
   /// the expectation value <term>.
   virtual SpinMeasureResult measure(cudaq::spin_op &op) = 0;
 

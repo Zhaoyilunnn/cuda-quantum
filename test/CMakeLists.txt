@@ -22,12 +22,15 @@ configure_lit_site_cfg(
 set(NVQPP_TEST_PARAMS
   nvqpp_site_config=${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py)
 
+get_property(test_cudaq_libraries GLOBAL PROPERTY CUDAQ_RUNTIME_LIBS)
+
 if (NOT CUDAQ_DISABLE_CPP_FRONTEND)
   set(NVQPP_TEST_DEPENDS
     cudaq-quake
     cudaq-opt
     cudaq-translate
     fixup-linkage
+    ${test_cudaq_libraries}
 
     CircuitCheck
     FileCheck)

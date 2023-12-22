@@ -20,7 +20,7 @@ struct simple_double_rotation {
   auto operator()(std::vector<double> theta) __qpu__ {
     auto size = theta.size();
     bool empty = theta.empty();
-    cudaq::qreg q(1);
+    cudaq::qvector q(1);
     int test = q.size();
     rx(theta[0], q[0]);
     mz(q);
@@ -33,7 +33,7 @@ struct simple_float_rotation {
   auto operator()(std::vector<float> theta) __qpu__ {
     int size = theta.size();
     bool empty = theta.empty();
-    cudaq::qreg q(1);
+    cudaq::qvector q(1);
     rx(theta[0], q[0]);
     mz(q);
   }
@@ -51,7 +51,7 @@ int main() {
   }
 
   // can get <ZZ...Z> from counts too
-  printf("Exp: %lf\n", counts.exp_val_z());
+  printf("Exp: %lf\n", counts.expectation());
 
   std::vector<float> float_args = {0.64};
 
@@ -64,6 +64,6 @@ int main() {
   }
 
   // can get <ZZ...Z> from counts too
-  printf("Exp: %lf\n", float_counts.exp_val_z());
+  printf("Exp: %lf\n", float_counts.expectation());
   return 0;
 }

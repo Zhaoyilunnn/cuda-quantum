@@ -1,10 +1,10 @@
-/*************************************************************** -*- C++ -*- ***
+/*******************************************************************************
  * Copyright (c) 2022 - 2023 NVIDIA Corporation & Affiliates.                  *
  * All rights reserved.                                                        *
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
- *******************************************************************************/
+ ******************************************************************************/
 #include "common/Logger.h"
 #include "common/RestClient.h"
 #include "common/ServerHelper.h"
@@ -13,6 +13,7 @@
 #include "nlohmann/json.hpp"
 
 #include <fstream>
+#include <regex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -159,7 +160,12 @@ public:
   bool jobIsDone(ServerMessage &getJobResponse) override;
 
   /// @brief Given a completed job response, map back to the sample_result
-  cudaq::sample_result processResults(ServerMessage &postJobResponse) override;
+  cudaq::sample_result processResults(ServerMessage &postJobResponse,
+                                      std::string &jobId) override;
+
+  /// @brief Update `passPipeline` with architecture-specific pass options
+  void updatePassPipeline(const std::filesystem::path &platformPath,
+                          std::string &passPipeline) override;
 };
 
 ServerJobPayload
@@ -208,8 +214,9 @@ bool IQMServerHelper::jobIsDone(ServerMessage &getJobResponse) {
 }
 
 cudaq::sample_result
-IQMServerHelper::processResults(ServerMessage &postJobResponse) {
-  cudaq::debug("postJobResponse: {}", postJobResponse.dump());
+IQMServerHelper::processResults(ServerMessage &postJobResponse,
+                                std::string &jobID) {
+  cudaq::info("postJobResponse: {}", postJobResponse.dump());
 
   // check if the job succeeded
   auto jobStatus = postJobResponse["status"].get<std::string>();
@@ -248,6 +255,15 @@ IQMServerHelper::generateRequestHeader() const {
     headers["Authorization"] = "Bearer " + apiToken.value();
   };
   return headers;
+}
+
+void IQMServerHelper::updatePassPipeline(
+    const std::filesystem::path &platformPath, std::string &passPipeline) {
+  std::string pathToFile =
+      platformPath / std::string("mapping/iqm") /
+      (backendConfig["qpu-architecture"] + std::string(".txt"));
+  passPipeline =
+      std::regex_replace(passPipeline, std::regex("%QPU_ARCH%"), pathToFile);
 }
 
 RestHeaders IQMServerHelper::getHeaders() { return generateRequestHeader(); }

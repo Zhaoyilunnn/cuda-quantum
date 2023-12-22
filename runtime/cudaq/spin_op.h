@@ -13,6 +13,7 @@
 #include <complex>
 #include <functional>
 #include <map>
+#include <random>
 
 // Define friend functions for operations between spin_op and scalars.
 #define CUDAQ_SPIN_SCALAR_OPERATIONS(op, U)                                    \
@@ -127,6 +128,7 @@ public:
                            _const_iter_type>;
     iterator(iterator &&) = default;
 
+    iterator(iterator const &other) : iter(other.iter) {}
     iterator(iter_type i) : iter(i) {}
     ~iterator() {
       for (auto &c : created) {
@@ -215,8 +217,10 @@ public:
           const std::vector<std::complex<double>> &coeffs);
 
   /// @brief Return a random spin operator acting on the specified number of
-  /// qubits and composed of the given number of terms.
-  static spin_op random(std::size_t nQubits, std::size_t nTerms);
+  /// qubits and composed of the given number of terms. Override `seed` for
+  /// repeatability.
+  static spin_op random(std::size_t nQubits, std::size_t nTerms,
+                        unsigned int seed = std::random_device{}());
 
   /// @brief Return a `spin_op` representative of the input
   /// Pauli word, e.g. XYX for a `spin_op` on 3 qubits with

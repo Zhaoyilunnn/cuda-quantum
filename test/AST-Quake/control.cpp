@@ -11,7 +11,7 @@
 #include <cudaq.h>
 
 struct heisenbergU {
-  void operator()(cudaq::qreg<> &q) __qpu__ {
+  void operator()(cudaq::qvector<> &q) __qpu__ {
     auto nQubits = q.size();
     for (int step = 0; step < 100; ++step) {
       for (int j = 0; j < nQubits; j++)
@@ -27,7 +27,7 @@ struct heisenbergU {
 struct ctrlHeisenberg {
   void operator()(int nQubits) __qpu__ {
     cudaq::qubit ctrl1, ctrl2;
-    cudaq::qreg q(nQubits);
+    cudaq::qvector q(nQubits);
     cudaq::control(heisenbergU{}, {ctrl1, ctrl2}, q);
   }
 };
@@ -39,7 +39,7 @@ struct ctrlHeisenberg {
 // CHECK:           %[[VAL_2:.*]] = quake.alloca !quake.ref
 // CHECK:           %[[VAL_3:.*]] = quake.alloca !quake.ref
 // CHECK:           %[[VAL_8:.*]] = quake.concat %[[VAL_2]], %[[VAL_3]] : (!quake.ref, !quake.ref) -> !quake.veq<2>
-// CHECK:           quake.apply @__nvqpp__mlirgen__heisenbergU[%[[VAL_8]]] %{{.*}} : (!quake.veq<2>, !quake.veq<?>) -> ()
+// CHECK:           quake.apply @__nvqpp__mlirgen__heisenbergU [%[[VAL_8]]] %{{.*}} : (!quake.veq<2>, !quake.veq<?>) -> ()
 // CHECK:           return
 
 struct givens {
@@ -68,10 +68,10 @@ __qpu__ void qnppx(double theta, cudaq::qubit &q, cudaq::qubit &r,
 
 // CHECK-LABEL:   func.func @__nvqpp__mlirgen__function_qnppx
 // CHECK:           %[[VAL_7:.*]] = quake.concat %{{.*}}, %{{.*}} : (!quake.ref, !quake.ref) -> !quake.veq<2>
-// CHECK:           quake.apply @__nvqpp__mlirgen__givens[%[[VAL_7]]] %{{.*}}, %{{.*}}, %{{.*}} : (!quake.veq<2>, f64, !quake.ref, !quake.ref) -> ()
+// CHECK:           quake.apply @__nvqpp__mlirgen__givens [%[[VAL_7]]] %{{.*}}, %{{.*}}, %{{.*}} : (!quake.veq<2>, f64, !quake.ref, !quake.ref) -> ()
 // CHECK:           return
 
-__qpu__ void magic_func(cudaq::qreg<> &q) {
+__qpu__ void magic_func(cudaq::qvector<> &q) {
   auto nQubits = q.size();
   for (int step = 0; step < 100; ++step) {
     for (int j = 0; j < nQubits; j++)
@@ -86,7 +86,7 @@ __qpu__ void magic_func(cudaq::qreg<> &q) {
 struct ctrlHeisenbergVersion2 {
   void operator()(int nQubits) __qpu__ {
     cudaq::qubit ctrl1;
-    cudaq::qreg q(nQubits);
+    cudaq::qvector q(nQubits);
     cudaq::control(magic_func, ctrl1, q);
   }
 };
@@ -95,7 +95,7 @@ struct ctrlHeisenbergVersion2 {
 // CHECK-SAME:      ._Z[[mangle:[^(]*]](
 
 // CHECK-LABEL:   func.func @__nvqpp__mlirgen__ctrlHeisenbergVersion2(
-// CHECK:           quake.apply @__nvqpp__mlirgen__function_magic_func._Z[[mangle]]{{\[}}%{{.*}}] %{{.*}} : (!quake.ref, !quake.veq<?>) -> ()
+// CHECK:           quake.apply @__nvqpp__mlirgen__function_magic_func._Z[[mangle]] [%{{.*}}] %{{.*}} : (!quake.ref, !quake.veq<?>) -> ()
 // CHECK:           return
 
 __qpu__ void qnppx2(double theta, cudaq::qubit &q, cudaq::qubit &r,
@@ -111,7 +111,7 @@ __qpu__ void qnppx2(double theta, cudaq::qubit &q, cudaq::qubit &r,
 // CHECK-SAME:       %{{[^:]*}}: f64{{.*}}, %[[VAL_1:.*]]: !quake.ref{{.*}}, %[[VAL_2:.*]]: !quake.ref{{.*}}, %[[VAL_3:.*]]: !quake.ref{{.*}}, %[[VAL_4:.*]]: !quake.ref{{.*}})
 // CHECK:           %[[VAL_7:.*]] = quake.concat %[[VAL_1]], %[[VAL_4]] : (!quake.ref, !quake.ref) -> !quake.veq<2>
 // CHECK:           quake.x %[[VAL_4]]
-// CHECK:           quake.apply @__nvqpp__mlirgen__givens[%[[VAL_7]]] %{{.*}}, %[[VAL_2]], %[[VAL_3]] : (!quake.veq<2>, f64, !quake.ref, !quake.ref) -> ()
+// CHECK:           quake.apply @__nvqpp__mlirgen__givens [%[[VAL_7]]] %{{.*}}, %[[VAL_2]], %[[VAL_3]] : (!quake.veq<2>, f64, !quake.ref, !quake.ref) -> ()
 // CHECK:           quake.x %[[VAL_4]] : (!quake.ref) -> ()
 // CHECK:           quake.x [%[[VAL_2]]] %[[VAL_1]] : (!quake.ref, !quake.ref) -> ()
 // CHECK:           quake.x [%[[VAL_3]]] %[[VAL_4]] : (!quake.ref, !quake.ref) -> ()

@@ -39,14 +39,14 @@ class QuakeOp<string mnemonic, list<Trait> traits = []> :
 def quake_AllocaOp : QuakeOp<"alloca", [MemoryEffects<[MemAlloc, MemWrite]>]> {
   let summary = "Allocates a reference or collection of references to wires.";
   let description = [{
-    The `alloca` operation allocates either a single wire reference or a vector
-    of references to wires. The size of the vector may be provided either
+    The `alloca` operation allocates either a single quantum reference or a
+    vector of quantum references. The size of the vector may be provided either
     statically as part of the type or dynamically as an integer-like argument,
     `size`. The return value will be a quantum reference, type `!quake.ref`,
     or a vector of such, type `!quake.veq<N>`.
 
-    All wires are assumed to be initialized to the value `|0>` initially. See
-    the `null_wire` op.
+    All references are assumed to be initialized to the value `|0>` initially.
+    See also the `null_wire` op.
 
     The `QuakeAddDeallocs` and `UnwindLowering` passes will insert deallocation
     ops for the scopes in which allocations appear automatically. This is
@@ -146,7 +146,7 @@ def quake_ComputeActionOp : QuakeOp<"compute_action"> {
   }];
 }
 
-def quake_ToControlOp : QuakeOp<"to_ctrl"> {
+def quake_ToControlOp : QuakeOp<"to_ctrl", [Pure]> {
   let summary = "Convert a wire value to a control value.";
   let description = [{
     This operation makes the conversion of a wire value to a control value
@@ -169,7 +169,7 @@ def quake_ToControlOp : QuakeOp<"to_ctrl"> {
   }];
 }
 
-def quake_FromControlOp : QuakeOp<"from_ctrl"> {
+def quake_FromControlOp : QuakeOp<"from_ctrl", [Pure]> {
   let summary = "Convert a control value to a wire value.";
   let description = [{
     This operation makes the conversion of a control value to a wire value
@@ -179,6 +179,7 @@ def quake_FromControlOp : QuakeOp<"from_ctrl"> {
 
   let arguments = (ins ControlType:$ctrlbit);
   let results = (outs WireType);
+  let hasVerifier = 1;
 
   let assemblyFormat = [{
     $ctrlbit `:` functional-type(operands, results) attr-dict
@@ -192,11 +193,11 @@ def quake_FromControlOp : QuakeOp<"from_ctrl"> {
 def quake_DeallocOp : QuakeOp<"dealloc"> {
   let summary = "Deallocates a collection of qubits.";
   let description = [{
-    The `dealloc` operation deallocates a references to wires. The deallocation
-    can be a single wire, type `!quake.ref`, or a vector of references, type
-    `!quake.veq<N>`.
+    The `dealloc` operation deallocates a quantum reference. The deallocation
+    can be a single quantum reference, `!quake.ref`, or a vector of quantum
+    references, `!quake.veq<N>`.
 
-    Deallocations are automatically inserted by the `QuakeAddDeallocs` and
+    Deallocations are automatically inserted by the `AddDeallocs` and
     `UnwindLowering` passes.
 
     Example:
@@ -211,11 +212,11 @@ def quake_DeallocOp : QuakeOp<"dealloc"> {
 
   let arguments = (ins
     Arg<AnyRefType, "qubit reference (or vector) to deallocate",
-    [MemFree]>:$qreg_or_vec
+    [MemFree]>:$reference
   );
 
   let assemblyFormat = [{
-    $qreg_or_vec `:` qualified(type($qreg_or_vec)) attr-dict
+    $reference `:` qualified(type($reference)) attr-dict
   }];
 }
 
@@ -224,7 +225,7 @@ def quake_DeallocOp : QuakeOp<"dealloc"> {
 //===----------------------------------------------------------------------===//
 
 def quake_ExtractRefOp : QuakeOp<"extract_ref", [Pure]> {
-  let summary = "Get a reference to a single wire.";
+  let summary = "Extract a quantum reference from a quantum vector.";
   let description = [{
     The `extract_ref` operation extracts a quantum reference from a vector of
     quantum references.
@@ -391,17 +392,49 @@ def quake_ApplyOp : QuakeOp<"apply",
   }];
 
   let arguments = (ins
-    SymbolRefAttr:$callee,
+    OptionalAttr<SymbolRefAttr>:$callee,
+    Variadic<cc_CallableType>:$indirect_callee, // must be 0 or 1 element
     UnitAttr:$is_adj,
     Variadic<AnyQType>:$controls,
     Variadic<AnyType>:$args
   );
   let results = (outs Variadic<AnyType>);
 
-  let assemblyFormat = [{
-    (`<` `adj` $is_adj^ `>`)? $callee (`[` $controls^ `]`)? $args `:`
-      functional-type(operands,results) attr-dict
-  }];
+  let hasCustomAssemblyFormat = 1;
+  let builders = [
+    OpBuilder<(ins "mlir::TypeRange":$retTy,
+                   "mlir::SymbolRefAttr":$callee,
+                   "mlir::UnitAttr":$is_adj,
+                   "mlir::ValueRange":$controls,
+                   "mlir::ValueRange":$args), [{
+      return build($_builder, $_state, retTy, callee, mlir::ValueRange{},
+                   is_adj, controls, args);
+    }]>,
+    OpBuilder<(ins "mlir::TypeRange":$retTy,
+                   "mlir::SymbolRefAttr":$callee,
+                   "bool":$is_adj,
+                   "mlir::ValueRange":$controls,
+                   "mlir::ValueRange":$args), [{
+      return build($_builder, $_state, retTy, callee, mlir::ValueRange{},
+                   is_adj, controls, args);
+    }]>,
+    OpBuilder<(ins "mlir::TypeRange":$retTy,
+                   "mlir::Value":$callable,
+                   "mlir::UnitAttr":$is_adj,
+                   "mlir::ValueRange":$controls,
+                   "mlir::ValueRange":$args), [{
+      return build($_builder, $_state, retTy, mlir::SymbolRefAttr{},
+                   mlir::ValueRange{callable}, is_adj, controls, args);
+    }]>,
+    OpBuilder<(ins "mlir::TypeRange":$retTy,
+                   "mlir::Value":$callable,
+                   "bool":$is_adj,
+                   "mlir::ValueRange":$controls,
+                   "mlir::ValueRange":$args), [{
+      return build($_builder, $_state, retTy, mlir::SymbolRefAttr{},
+                   mlir::ValueRange{callable}, is_adj, controls, args);
+    }]>
+  ];
 
   let extraClassDeclaration = [{
     static constexpr llvm::StringRef getCalleeAttrNameStr() { return "callee"; }
@@ -454,6 +487,8 @@ def quake_UnwrapOp : QuakeOp<"unwrap"> {
 
   let arguments = (ins Arg<RefType,"",[MemRead]>:$ref_value);
   let results = (outs WireType);
+  let hasVerifier = 1;
+
   let assemblyFormat = [{
     $ref_value `:` functional-type(operands, results) attr-dict
   }];
@@ -487,6 +522,7 @@ def quake_NullWireOp : QuakeOp<"null_wire"> {
   }];
 
   let results = (outs WireType);
+  let hasVerifier = 1;
   let assemblyFormat = "attr-dict";
 }
 
@@ -509,8 +545,14 @@ def quake_ResetOp : QuakeOp<"reset", [QuantumGate,
     ```
   }];
 
-  let arguments = (ins AnyQType:$targets);
-  let results = (outs Variadic<WireType>);
+  let arguments = (ins
+    AnyQTargetType:$targets
+  );
+  let results = (outs
+    Variadic<WireType>:$wires
+  );
+  let hasVerifier = 1;
+
   let assemblyFormat = [{
      $targets `:` functional-type(operands, results) attr-dict
   }];
@@ -558,13 +600,17 @@ def quake_SinkOp : QuakeOp<"sink"> {
 class Measurement<string mnemonic> : QuakeOp<mnemonic, [MeasurementInterface,
     QuantumMeasure, DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
   let arguments = (ins
-    Variadic<AnyQType>:$targets,
+    Variadic<AnyQTargetType>:$targets,
     OptionalAttr<StrAttr>:$registerName
   );
-  let results = (outs AnyTypeOf<[I1, StdvecOf<[I1]>]>:$bits);
+  let results = (outs
+    AnyTypeOf<[MeasureType, StdvecOf<[MeasureType]>]>:$measOut,
+    Variadic<WireType>:$wires
+  );
 
   let assemblyFormat = [{
-    $targets `:` functional-type(operands, results) attr-dict
+    $targets (`name` $registerName^)? `:` functional-type(operands, results)
+      attr-dict
   }];
 
   code OpBaseDeclaration = [{
@@ -620,8 +666,36 @@ def MzOp : Measurement<"mz"> {
   let extraClassDeclaration = OpBaseDeclaration;
 }
 
+def DiscriminateOp : QuakeOp<"discriminate", [Pure]> {
+  let summary = "Converts a measurement to a classical integral value.";
+  let description = [{
+    Quake's measurement operators return a value of type `!quake.measure`. The
+    discriminate operation converts a value of type measure to a classical
+    integral value. This value is typically an `i1` type, but might be `i2` for
+    qutrits, or even an `i8` for general qudits.
+
+    While a measurement of a wire changes/corrupts the state of the wire, the
+    model maintains that a `!quake.measure` value is non-volatile. Therefore,
+    multiple applications of discriminate on the same `!quake.measure` value
+    will yield the same result value for a given result type.
+  }];
+
+  let arguments = (ins
+    AnyTypeOf<[MeasureType, StdvecOf<[MeasureType]>]>:$measurement
+  );
+  let results = (outs
+    AnyTypeOf<[AnySignlessInteger, StdvecOf<[AnySignlessInteger]>]>
+  );
+
+  let assemblyFormat = [{
+    $measurement `:` functional-type(operands, results) attr-dict
+  }];
+
+  let hasVerifier = 1;
+}
+
 //===----------------------------------------------------------------------===//
-// Quantum operators (gates)
+// Quantum gates
 //===----------------------------------------------------------------------===//
 
 class QuakeOperator<string mnemonic, list<Trait> traits = []>
@@ -633,10 +707,12 @@ class QuakeOperator<string mnemonic, list<Trait> traits = []>
     UnitAttr:$is_adj,
     Variadic<AnyFloat>:$parameters,
     Variadic<AnyQType>:$controls,
-    Variadic<AnyQType>:$targets,
+    Variadic<AnyQTargetType>:$targets,
     OptionalAttr<DenseBoolArrayAttr>:$negated_qubit_controls
   );
-  let results = (outs Variadic<WireType>);
+  let results = (outs
+    Variadic<WireType>:$wires
+  );
 
   let builders = [
     OpBuilder<(ins "mlir::UnitAttr":$is_adj,
@@ -693,6 +769,8 @@ class QuakeOperator<string mnemonic, list<Trait> traits = []>
     $targets `:` functional-type(operands, results) attr-dict
   }];
 
+  let hasVerifier = 1;
+
   code extraClassDeclaration = [{
     //===------------------------------------------------------------------===//
     // MemoryEffects interface
@@ -740,13 +818,35 @@ class TwoTargetOp<string mnemonic, list<Trait> traits = []> :
                 traits)>;
 
 //===----------------------------------------------------------------------===//
-// Quantum operators (gates)
+// Unitary quantum transformations
 //===----------------------------------------------------------------------===//
+
+def ExpPauliOp : QuakeOp<"exp_pauli"> {
+  let summary = "General Pauli tensor product rotation";
+  let description = [{
+    This operation affects a general Pauli tensor product rotation on 
+    the input qubits. The number of Pauli characters in the input Pauli word 
+    string must equal the number of qubits in the veq. Mathematically, this
+    operation applies exp(i theta P) where P is a general Pauli tensor product. 
+  }];
+  
+  let arguments = (ins
+    AnyFloat:$parameter,
+    VeqType:$qubits,
+    cc_PointerType:$pauli
+  );
+  let results = (outs);
+
+  let assemblyFormat = [{
+    `(` $parameter `)` $qubits `,` $pauli `:` functional-type(operands,
+      results) attr-dict
+  }];
+}
 
 def HOp : OneTargetOp<"h", [Hermitian]> {
   let summary = "Hadamard operation";
   let description = [{
-    This is a pi rotation about the X+Z axis, and has the effect of changing the
+    This is a π rotation about the X+Z axis, and has the effect of changing the
     computation basis from |0> (|1>) to |+> (|->) and vice-versa, meaning that
     it enables one to create a superposition of basis states.
 
@@ -772,7 +872,7 @@ def PhasedRxOp : QuakeOperator<"phased_rx",
     Matrix representation:
     ```
     PhasedRx(θ,φ) = |        cos(θ/2)        -iexp(-iφ) * sin(θ/2) |
-                    | -iexp(iφ)) * sin(θ/2)         cos(θ/2)       |
+                    |  -iexp(iφ) * sin(θ/2)         cos(θ/2)       |
     ```
 
     Circuit symbol:
@@ -818,6 +918,7 @@ def RxOp : OneTargetParamOp<"rx", [Rotation]> {
      └───────┘
     ```
   }];
+  let hasCanonicalizer = 1;
 }
 
 def RyOp : OneTargetParamOp<"ry", [Rotation]> {
@@ -836,6 +937,7 @@ def RyOp : OneTargetParamOp<"ry", [Rotation]> {
      └───────┘
     ```
   }];
+  let hasCanonicalizer = 1;
 }
 
 def RzOp : OneTargetParamOp<"rz", [Rotation]> {
@@ -854,12 +956,13 @@ def RzOp : OneTargetParamOp<"rz", [Rotation]> {
      └───────┘
     ```
   }];
+  let hasCanonicalizer = 1;
 }
 
 def SOp : OneTargetOp<"s"> {
   let summary = "S operation (aka, P or Sqrt(Z))";
   let description = [{
-    This operation applies to its target a pi/2 rotation about the Z axis.
+    This operation applies to its target a π/2 rotation about the Z axis.
 
     Matrix representation:
     ```
@@ -879,7 +982,7 @@ def SOp : OneTargetOp<"s"> {
 def SwapOp : TwoTargetOp<"swap", [Hermitian]> {
   let summary = "Swap operation";
   let description = [{
-    This operation swaps the states of two wires.
+    This operation swaps the states of two qubits.
 
     Matrix representation:
     ```

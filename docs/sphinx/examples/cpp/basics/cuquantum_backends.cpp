@@ -7,9 +7,8 @@
 // GPU-accelerated backends and their ability to easily handle
 // a larger number of qubits compared the CPU-only backend.
 
-// Without the `--target nvidia` flag, this seems to hang, i.e.
-// it takes a long time for the CPU-only backend to handle
-// this number of qubits.
+// On CPU-only backends, this seems to hang, i.e. it takes a long
+// time to handle this number of qubits.
 
 #include <cudaq.h>
 
@@ -18,7 +17,7 @@ struct ghz {
   auto operator()(const int N) __qpu__ {
 
     // Dynamic, vector-like `qreg`
-    cudaq::qreg q(N);
+    cudaq::qvector q(N);
     h(q[0]);
     for (int i = 0; i < N - 1; i++) {
       x<cudaq::ctrl>(q[i], q[i + 1]);
@@ -28,12 +27,15 @@ struct ghz {
 };
 
 int main() {
-  auto counts = cudaq::sample(ghz{}, 30);
-  counts.dump();
+  auto counts = cudaq::sample(/*shots=*/100, ghz{}, 28);
 
-  // Fine grain access to the bits and counts
-  for (auto &[bits, count] : counts) {
-    printf("Observed: %s, %lu\n", bits.data(), count);
+  if (!cudaq::mpi::is_initialized() || cudaq::mpi::rank() == 0) {
+    counts.dump();
+
+    // Fine grain access to the bits and counts
+    for (auto &[bits, count] : counts) {
+      printf("Observed: %s, %lu\n", bits.data(), count);
+    }
   }
 
   return 0;

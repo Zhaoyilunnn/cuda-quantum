@@ -6,7 +6,6 @@
 # the terms of the Apache License 2.0 which accompanies this distribution.     #
 # ============================================================================ #
 
-
 import cudaq, pytest, os, time
 from cudaq import spin
 from multiprocessing import Process
@@ -17,7 +16,8 @@ except:
     pytest.skip("Mock qpu not available.", allow_module_level=True)
 
 # Define the port for the mock server
-port = 62454
+port = 62440
+
 
 def assert_close(got) -> bool:
     return got < -1.5 and got > -1.9
@@ -32,6 +32,9 @@ def startUpMockServer():
     f.close()
 
     cudaq.set_random_seed(13)
+    
+    # Set the targeted QPU
+    cudaq.set_target('quantinuum', url='http://localhost:{}'.format(port))
 
     # Launch the Mock Server
     p = Process(target=startServer, args=(port,))
@@ -48,7 +51,7 @@ def startUpMockServer():
 @pytest.fixture(scope="function", autouse=True)
 def configureTarget(startUpMockServer):
 
-    # Set the targeted QPU
+    # Set the targeted QPU with credentials
     cudaq.set_target('quantinuum',
                      url='http://localhost:{}'.format(port),
                      credentials=startUpMockServer)
@@ -120,13 +123,13 @@ def test_quantinuum_observe():
 
     # Run the observe task on quantinuum synchronously
     res = cudaq.observe(kernel, hamiltonian, .59)
-    assert assert_close(res.expectation_z())
+    assert assert_close(res.expectation())
 
     # Launch it asynchronously, enters the job into the queue
     future = cudaq.observe_async(kernel, hamiltonian, .59)
     # Retrieve the results (since we're on a mock server)
     res = future.get()
-    assert assert_close(res.expectation_z())
+    assert assert_close(res.expectation())
 
     # Launch the job async, job goes in the queue, and
     # we're free to dump the future to file
@@ -139,7 +142,7 @@ def test_quantinuum_observe():
     # the results from the term job ids.
     futureReadIn = cudaq.AsyncObserveResult(futureAsString, hamiltonian)
     res = futureReadIn.get()
-    assert assert_close(res.expectation_z())
+    assert assert_close(res.expectation())
 
 
 # leave for gdb debugging

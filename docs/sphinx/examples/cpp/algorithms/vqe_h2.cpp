@@ -46,7 +46,7 @@ __qpu__ void so4(cudaq::qubit &q, cudaq::qubit &r,
 struct so4_fabric {
   void operator()(std::vector<double> params, int n_qubits,
                   int n_layers) __qpu__ {
-    cudaq::qreg q(n_qubits);
+    cudaq::qvector q(n_qubits);
 
     x(q[0]);
     x(q[2]);
@@ -99,7 +99,8 @@ int main() {
   printf("%d qubit hamiltonian -> %d parameters\n", n_qubits, n_params);
 
   // Run the VQE algorithm from specific initial parameters.
-  auto init_params = cudaq::random_vector(-1, 1, n_params);
+  auto init_params =
+      cudaq::random_vector(-1, 1, n_params, std::mt19937::default_seed);
 
   // Create the CUDA Quantum kernel
   so4_fabric ansatz;
@@ -112,9 +113,10 @@ int main() {
   cudaq::optimizers::lbfgs optimizer;
   optimizer.initial_parameters = init_params;
   optimizer.max_eval = 20;
+  optimizer.max_line_search_trials = 10;
   cudaq::gradients::central_difference gradient(ansatz, argMapper);
   auto [opt_val, opt_params] =
       cudaq::vqe(ansatz, gradient, H, optimizer, n_params, argMapper);
 
-  printf("Optimal value = %lf\n", opt_val);
+  printf("Optimal value = %.16lf\n", opt_val);
 }

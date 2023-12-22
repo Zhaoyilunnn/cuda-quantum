@@ -20,11 +20,12 @@ target_include_directories(nvqir-qpp-observe-test
            ${CMAKE_SOURCE_DIR}/runtime/common 
            ${CMAKE_SOURCE_DIR}/runtime/nvqir 
            ${CMAKE_SOURCE_DIR}/tpls/eigen
-           ${CMAKE_SOURCE_DIR}/tpls/qpp/include)
+)
+
 target_link_libraries(nvqir-qpp-observe-test
   PUBLIC fmt::fmt-header-only
           cudaq-common
-          cudaq-spin ${QPP_DEPENDENCIES})
+          cudaq-spin ${QPP_DEPENDENCIES} libqpp)
 
 add_executable(test_observe_backend QppObserveTester.cpp)
 if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
@@ -40,6 +41,6 @@ target_link_libraries(test_observe_backend
   nvqir-qpp-observe-test
   cudaq-spin 
   cudaq-platform-default 
-  cudaq-em-qir
+  cudaq-em-default
   gtest_main)
 gtest_discover_tests(test_observe_backend)

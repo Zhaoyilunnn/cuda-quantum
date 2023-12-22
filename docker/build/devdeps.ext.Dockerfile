@@ -28,6 +28,7 @@ SHELL ["/bin/bash", "-c"]
 # Given as arg to make sure that this value is only set during build but not in the launched container.
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt-get install -y --no-install-recommends ca-certificates wget \
+    && apt-get upgrade -y libc-bin libcap2 \
     && apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/* 
 
 # Install Mellanox OFED runtime dependencies.
@@ -38,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gnupg \
     && apt-get update -y && apt-get install -y --no-install-recommends \
         ibverbs-providers ibverbs-utils \
         libibmad5 libibumad3 libibverbs1 librdmacm1 \
+    && rm /etc/apt/trusted.gpg && rm /etc/apt/sources.list.d/mellanox_mlnx_ofed.list \
     && apt-get remove -y gnupg \
     && apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/* 
 
@@ -93,6 +95,7 @@ ARG OPENMPI_INSTALL_PREFIX=/usr/local/openmpi
 ENV OPENMPI_INSTALL_PREFIX="$OPENMPI_INSTALL_PREFIX"
 ENV MPI_HOME="$OPENMPI_INSTALL_PREFIX"
 ENV MPI_ROOT="$OPENMPI_INSTALL_PREFIX"
+ENV MPI_PATH="$OPENMPI_INSTALL_PREFIX"
 ENV PATH="$OPENMPI_INSTALL_PREFIX/bin:$PATH"
 ENV CPATH="$OPENMPI_INSTALL_PREFIX/include:/usr/local/ofed/5.0-0/include:$CPATH"
 ENV LIBRARY_PATH="/usr/local/ofed/5.0-0/lib:$LIBRARY_PATH"
@@ -118,13 +121,14 @@ ENV UCX_TLS=rc,cuda_copy,cuda_ipc,gdr_copy,sm
 ARG CUQUANTUM_INSTALL_PREFIX=/opt/nvidia/cuquantum
 ENV CUQUANTUM_INSTALL_PREFIX="$CUQUANTUM_INSTALL_PREFIX"
 ENV CUQUANTUM_ROOT="$CUQUANTUM_INSTALL_PREFIX"
+ENV CUQUANTUM_PATH="$CUQUANTUM_INSTALL_PREFIX"
 ENV LD_LIBRARY_PATH="$CUQUANTUM_INSTALL_PREFIX/lib:$LD_LIBRARY_PATH"
 ENV CPATH="$CUQUANTUM_INSTALL_PREFIX/include:$CPATH"
 
-ENV CUQUANTUM_VERSION=23.06.0.7_cuda11
+ENV CUQUANTUM_VERSION=23.10.0.6_cuda11
 RUN apt-get update && apt-get install -y --no-install-recommends xz-utils \
     && arch_folder=$([ "$(uname -m)" == "aarch64" ] && echo sbsa || echo x86_64) \
-    && wget -q "https://developer.download.nvidia.com/compute/cuquantum/redist/cuquantum/linux-$arch_folder/cuquantum-linux-$arch_folder-23.06.0.7_cuda11-archive.tar.xz" \
+    && wget -q "https://developer.download.nvidia.com/compute/cuquantum/redist/cuquantum/linux-$arch_folder/cuquantum-linux-$arch_folder-$CUQUANTUM_VERSION-archive.tar.xz" \
     && mkdir -p "$CUQUANTUM_INSTALL_PREFIX" && tar xf cuquantum-linux-$arch_folder-$CUQUANTUM_VERSION-archive.tar.xz --strip-components 1 -C "$CUQUANTUM_INSTALL_PREFIX" \
     && rm cuquantum-linux-$arch_folder-$CUQUANTUM_VERSION-archive.tar.xz \
     && apt-get remove -y xz-utils \
@@ -150,29 +154,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends xz-utils \
 
 # Install CUDA 11.8.
 
-ARG cuda_packages="cuda-cudart-11-8 cuda-compiler-11-8 libcublas-dev-11-8"
-RUN arch_folder=$([ "$(uname -m)" == "aarch64" ] && echo sbsa || echo x86_64) \
-    && wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/$arch_folder/cuda-keyring_1.0-1_all.deb" \
-    && dpkg -i cuda-keyring_1.0-1_all.deb \
-    && apt-get update && apt-get install -y --no-install-recommends $cuda_packages \
-    && rm cuda-keyring_1.0-1_all.deb \
-    && apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/* 
+ARG cuda_root=/usr/local/cuda-11.8
+ARG cuda_packages="cuda-cudart-11-8 cuda-compiler-11-8 libcublas-dev-11-8 libcusolver-11-8"
+RUN if [ -n "$cuda_packages" ]; then \
+        arch_folder=$([ "$(uname -m)" == "aarch64" ] && echo sbsa || echo x86_64) \
+        && wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/$arch_folder/cuda-keyring_1.0-1_all.deb" \
+        && dpkg -i cuda-keyring_1.0-1_all.deb \
+        && apt-get update && apt-get install -y --no-install-recommends $cuda_packages \
+        && rm cuda-keyring_1.0-1_all.deb \
+        && apt-get autoremove -y --purge && apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # The installation of CUDA above creates files that will be injected upon launching the container
 # with the --gpu=all flag. This creates issues upon container launch. We hence remove these files.
 # As long as the container is launched with the --gpu=all flag, the GPUs remain accessible and CUDA
 # is fully functional. See also https://github.com/NVIDIA/nvidia-docker/issues/1699.
-RUN rm -rf \
-    /usr/lib/$(uname -m)-linux-gnu/libcuda.so* \
-    /usr/lib/$(uname -m)-linux-gnu/libnvcuvid.so* \
-    /usr/lib/$(uname -m)-linux-gnu/libnvidia-*.so* \
-    /usr/lib/firmware \
-    /usr/local/cuda/compat/lib
+RUN if [ -z "$CUDA_ROOT" ]; then \
+        rm -rf \
+        /usr/lib/$(uname -m)-linux-gnu/libcuda.so* \
+        /usr/lib/$(uname -m)-linux-gnu/libnvcuvid.so* \
+        /usr/lib/$(uname -m)-linux-gnu/libnvidia-*.so* \
+        /usr/lib/firmware \
+        /usr/local/cuda/compat/lib; \
+    fi
 
-ENV CUDA_INSTALL_PREFIX=/usr/local/cuda-11.8
+ENV CUDA_INSTALL_PREFIX="$cuda_root"
 ENV CUDA_HOME="$CUDA_INSTALL_PREFIX"
 ENV CUDA_ROOT="$CUDA_INSTALL_PREFIX"
 ENV CUDA_PATH="$CUDA_INSTALL_PREFIX"
 ENV PATH="${CUDA_INSTALL_PREFIX}/lib64/:${CUDA_INSTALL_PREFIX}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="${CUDA_INSTALL_PREFIX}/lib64:${CUDA_INSTALL_PREFIX}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
-ENV CPATH="$CPATH:$CUDA_INSTALL_PREFIX/targets/x86_64-linux/include/"
+
+# Active MPI support for the cuTensorNet library
+
+RUN cd "$CUQUANTUM_INSTALL_PREFIX/distributed_interfaces/" \
+    && source activate_mpi.sh
+ENV CUTENSORNET_COMM_LIB="$CUQUANTUM_INSTALL_PREFIX/distributed_interfaces/libcutensornet_distributed_interface_mpi.so"

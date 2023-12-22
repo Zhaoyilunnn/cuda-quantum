@@ -7,6 +7,8 @@
  ******************************************************************************/
 
 #pragma once
+
+#include "host_config.h"
 #include <functional>
 #include <map>
 #include <memory>
@@ -41,14 +43,6 @@ protected:
   /// to validate that the number of required unique elements
   /// is equal to the number provided as input at runtime.
   bool canValidateVectorNumElements = true;
-
-  /// @brief Keep track of previously extracted QuakeValues from
-  /// a concrete index value
-  std::map<std::size_t, QuakeValue> extractedFromIndex;
-
-  /// @brief Keep track of previously extracted QuakeValues from
-  /// another QuakeValue (represented by its unique opaque pointer)
-  std::map<void *, QuakeValue> extractedFromValue;
 
 public:
   /// @brief Return the actual MLIR Value
@@ -118,6 +112,12 @@ public:
   /// @brief Multiply this QuakeValue by the given QuakeValue
   QuakeValue operator*(QuakeValue other);
 
+  /// @brief Divide this QuakeValue by the given double.
+  QuakeValue operator/(const double);
+
+  /// @brief Divide this QuakeValue by the given QuakeValue
+  QuakeValue operator/(QuakeValue other);
+
   /// @brief Add this QuakeValue with the given double.
   QuakeValue operator+(const double);
 
@@ -135,24 +135,74 @@ public:
 
   /// @brief Subtract the given QuakeValue from this QuakeValue
   QuakeValue operator-(QuakeValue other);
+
+  /// @brief Return the inverse (1/x) of this QuakeValue
+  QuakeValue inverse() const;
 };
 
+#if CUDAQ_USE_STD20
 /// @brief Concept constraining the input type below to be a QuakeValue
 template <typename ValueType>
 concept IsQuakeValue = std::is_convertible_v<ValueType, QuakeValue>;
 
-/// @brief Concept constraining the LHS args to be numeric below
+/// Concept constraining the LHS arguments to be numeric below.
 template <typename T>
 concept IsNumericType = requires(T param) { std::is_convertible_v<T, double>; };
 
 QuakeValue operator*(IsNumericType auto &&d, IsQuakeValue auto &&q) {
   return q * d;
 }
+
+QuakeValue operator*(IsQuakeValue auto &&q, IsNumericType auto &&d) {
+  return q * d;
+}
+
 QuakeValue operator-(IsNumericType auto &&d, IsQuakeValue auto &&q) {
   return -q + d;
 }
 QuakeValue operator+(IsNumericType auto &&d, IsQuakeValue auto &&q) {
   return q + d;
 }
+QuakeValue operator/(IsNumericType auto &&d, IsQuakeValue auto &&q) {
+  return q.inverse() * d;
+}
+
+#else
+// C++ 2011 compatible definitions.
+template <typename N, typename Q,
+          typename = std::enable_if_t<std::is_convertible_v<N, double>>,
+          typename = std::enable_if_t<std::is_convertible_v<Q, QuakeValue>>>
+QuakeValue operator*(N &&d, Q &&q) {
+  return q * d;
+}
+
+template <typename N, typename Q,
+          typename = std::enable_if_t<std::is_convertible_v<N, double>>,
+          typename = std::enable_if_t<std::is_convertible_v<Q, QuakeValue>>>
+QuakeValue operator*(Q &&q, N &&d) {
+  return q * d;
+}
+
+template <typename N, typename Q,
+          typename = std::enable_if_t<std::is_convertible_v<N, double>>,
+          typename = std::enable_if_t<std::is_convertible_v<Q, QuakeValue>>>
+QuakeValue operator-(N &&d, Q &&q) {
+  return -q + d;
+}
+
+template <typename N, typename Q,
+          typename = std::enable_if_t<std::is_convertible_v<N, double>>,
+          typename = std::enable_if_t<std::is_convertible_v<Q, QuakeValue>>>
+QuakeValue operator+(N &&d, Q &&q) {
+  return q + d;
+}
+
+template <typename N, typename Q,
+          typename = std::enable_if_t<std::is_convertible_v<N, double>>,
+          typename = std::enable_if_t<std::is_convertible_v<Q, QuakeValue>>>
+QuakeValue operator/(N &&d, Q &&q) {
+  return q.inverse() * d;
+}
+#endif
 
 } // namespace cudaq

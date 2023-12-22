@@ -17,7 +17,7 @@
 // Define a quantum kernel
 struct ghz {
   auto operator()() __qpu__ {
-    cudaq::qreg<5> q;
+    cudaq::qarray<5> q;
     h(q[0]);
     for (int i = 0; i < 4; i++) {
       x<cudaq::ctrl>(q[i], q[i + 1]);
@@ -40,7 +40,7 @@ int main() {
   }
 
   // can get <ZZ...Z> from counts too
-  printf("Exp: %lf\n", counts.exp_val_z());
+  printf("Exp: %lf\n", counts.expectation());
 
   return 0;
 }
@@ -75,7 +75,7 @@ int main() {
 // CHECK:               cc.store %[[VAL_16]], %[[VAL_5]] : !cc.ptr<i32>
 // CHECK:             }
 // CHECK:           }
-// CHECK:           %[[VAL_17:.*]] = quake.mz %[[VAL_3]] : (!quake.veq<5>) -> !cc.stdvec<i1>
+// CHECK:           %[[VAL_17:.*]] = quake.mz %[[VAL_3]] : (!quake.veq<5>) -> !cc.stdvec<!quake.measure>
 // CHECK:           return
 // CHECK:         }
 

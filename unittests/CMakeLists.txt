@@ -10,6 +10,7 @@ SET(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
 set (CMAKE_CXX_FLAGS
      "${CMAKE_CXX_FLAGS} -Wno-attributes -Wno-ctad-maybe-unsupported")
 
+
 set(CUDAQ_RUNTIME_TEST_SOURCES 
   # Integration tests
   integration/adjoint_tester.cpp
@@ -32,12 +33,14 @@ set(CUDAQ_RUNTIME_TEST_SOURCES
   integration/observe_result_tester.cpp
   integration/noise_tester.cpp
   integration/get_state_tester.cpp
+  integration/measure_reset_tester.cpp
   qir/NVQIRTester.cpp
   qis/QubitQISTester.cpp
   integration/kernels_tester.cpp
   common/MeasureCountsTester.cpp
   common/NoiseModelTester.cpp
   integration/tracer_tester.cpp
+  integration/gate_library_tester.cpp
 )
 
 # Make it so we can get function symbols
@@ -50,8 +53,9 @@ macro (create_tests_with_backend NVQIR_BACKEND EXTRA_BACKEND_TESTER)
   string(REPLACE "-" "_" NVQIR_BACKEND_OUT ${NVQIR_BACKEND})
   add_executable(${TEST_EXE_NAME} main.cpp ${CUDAQ_RUNTIME_TEST_SOURCES} ${EXTRA_BACKEND_TESTER})
   target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DNVQIR_BACKEND_NAME=${NVQIR_BACKEND_OUT})
+  target_compile_definitions(${TEST_EXE_NAME} PRIVATE __MATH_LONG_DOUBLE_CONSTANTS)
   target_include_directories(${TEST_EXE_NAME} PRIVATE .)
-  # On GCC, the default is --as-needed for linking, and therefore the 
+  # On GCC, the default is --as-needed for linking, and therefore the
   # nvqir-simulation plugin may not get picked up. This works as is on clang 
   # But here we add it purposefully to avoid that bug. 
   if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
@@ -67,16 +71,19 @@ macro (create_tests_with_backend NVQIR_BACKEND EXTRA_BACKEND_TESTER)
   if (${NVQIR_BACKEND} STREQUAL "dm")
      target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DCUDAQ_BACKEND_DM)
   endif()
+  if (${NVQIR_BACKEND} STREQUAL "tensornet")
+     target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DCUDAQ_BACKEND_TENSORNET)
+  endif()
+  if (${NVQIR_BACKEND} STREQUAL "tensornet-mps")
+     target_compile_definitions(${TEST_EXE_NAME} PRIVATE -DCUDAQ_BACKEND_TENSORNET -DCUDAQ_BACKEND_TENSORNET_MPS)
+  endif()
   gtest_discover_tests(${TEST_EXE_NAME})
 endmacro()
 
 # We will always have the QPP backend, create a tester for it
 create_tests_with_backend(qpp backends/QPPTester.cpp)
-create_tests_with_backend(dm "")
+create_tests_with_backend(dm backends/QPPDMTester.cpp)
 
-# FIXME Check that we have GPUs. Could be in a 
-# Docker environment built with CUDA, but no --gpus flag
-# or no gpus on the system.
 if (CUSTATEVEC_ROOT AND CUDA_FOUND) 
   create_tests_with_backend(custatevec-fp32 "")
   # Given that the fp32 and fp64 difference is largely inherited
@@ -92,6 +99,7 @@ if (CUSTATEVEC_ROOT AND CUDA_FOUND)
   target_link_libraries(test_mqpu
     PRIVATE 
     cudaq
+    cudaq-builder
     cudaq-platform-mqpu
     nvqir-custatevec-fp64
     gtest_main)
@@ -99,24 +107,33 @@ if (CUSTATEVEC_ROOT AND CUDA_FOUND)
 
     if (MPI_CXX_FOUND)
       # Count the number of GPUs
-      execute_process(COMMAND bash -c "nvidia-smi --list-gpus | wc -l" OUTPUT_VARIABLE NGPUS)
-      # Only build this test if we have more than 1 GPU
-      if (${NGPUS} GREATER_EQUAL 2)
-        add_executable(test_mpi main.cpp mqpu/mpi_mqpu_tester.cpp)
-        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
-          target_link_options(test_mpi PRIVATE -Wl,--no-as-needed)
+      find_program(NVIDIA_SMI "nvidia-smi")
+      if(NVIDIA_SMI)
+        execute_process(COMMAND bash -c "nvidia-smi --list-gpus | wc -l" OUTPUT_VARIABLE NGPUS)
+        # Only build this test if we have more than 1 GPU
+        if (${NGPUS} GREATER_EQUAL 2)
+          add_executable(test_mpi main.cpp mqpu/mpi_mqpu_tester.cpp)
+          if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+            target_link_options(test_mpi PRIVATE -Wl,--no-as-needed)
+          endif()
+          target_link_libraries(test_mpi
+              PRIVATE 
+              cudaq
+              cudaq-platform-mqpu
+              nvqir-custatevec-fp32
+              gtest_main)
+            configure_file("mqpu/run_mpi.sh.in"
+                      "${CMAKE_BINARY_DIR}/unittests/run_mpi.sh" @ONLY)
+          add_test(NAME MPITest COMMAND ${MPIEXEC} --allow-run-as-root -np 2 bash ${CMAKE_BINARY_DIR}/unittests/run_mpi.sh)
         endif()
-        target_link_libraries(test_mpi
-            PRIVATE 
-            cudaq
-            cudaq-platform-mqpu
-            nvqir-custatevec-fp32
-            gtest_main)
-          configure_file("mqpu/run_mpi.sh.in"
-                    "${CMAKE_BINARY_DIR}/unittests/run_mpi.sh" @ONLY)
-        add_test(NAME MPITest COMMAND ${MPIEXEC} --allow-run-as-root -np 2 ${CMAKE_BINARY_DIR}/unittests/run_mpi.sh)
       endif()
     endif() 
+endif() 
+
+if(TARGET nvqir-tensornet)
+  message(STATUS "Building cutensornet backend tests.")
+  create_tests_with_backend(tensornet "")
+  create_tests_with_backend(tensornet-mps "")
 endif() 
 
 # Create an executable for SpinOp UnitTests
@@ -131,6 +148,8 @@ target_link_libraries(test_spin
   gtest_main)
 gtest_discover_tests(test_spin)
 
+add_subdirectory(plugin)
+
 # build the test qudit execution manager
 add_subdirectory(qudit)
 add_executable(test_qudit main.cpp qudit/SimpleQuditTester.cpp)
@@ -144,6 +163,60 @@ target_link_libraries(test_qudit
   cudaq-em-qudit
   gtest_main)
 gtest_discover_tests(test_qudit)
+
+# build the test photonics execution manager
+add_executable(test_photonics main.cpp photonics/PhotonicsTester.cpp)
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+  target_link_options(test_photonics PRIVATE -Wl,--no-as-needed)
+endif()
+target_link_libraries(test_photonics
+  PRIVATE 
+  cudaq
+  cudaq-platform-default
+  cudaq-em-photonics
+  nvqir-qpp
+  gtest_main)
+gtest_discover_tests(test_photonics)
+
+add_executable(test_utils main.cpp utils/UtilsTester.cpp)
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE)
+  target_link_options(test_utils PRIVATE -Wl,--no-as-needed)
+endif()
+target_link_libraries(test_utils
+  PRIVATE 
+  cudaq
+  cudaq-platform-default
+  cudaq-em-photonics
+  nvqir-qpp fmt::fmt-header-only
+  gtest_main)
+gtest_discover_tests(test_utils)
+
+# Create an executable for MPI UnitTests
+# (only if MPI was found, i.e., the builtin plugin is available)
+if (MPI_CXX_FOUND)
+  set(CUDAQ_MPI_TEST_SOURCES 
+    mpi/mpi_tester.cpp
+  )
+  add_executable(test_mpi_plugin ${CUDAQ_MPI_TEST_SOURCES})
+  set(NUM_PROCS 4)
+  target_compile_definitions(test_mpi_plugin PRIVATE -DNUM_PROCS=${NUM_PROCS})
+  target_link_libraries(test_mpi_plugin
+    PRIVATE 
+    cudaq
+    cudaq-platform-default
+    nvqir-qpp
+    gtest
+  )
+  target_link_options(test_mpi_plugin PRIVATE -Wl,--no-as-needed)
+  # Check if `--allow-run-as-root` is supported (OpenMPI)
+  # Note: MPICH doesn't need `--allow-run-as-root`.
+  execute_process(COMMAND ${MPIEXEC} --allow-run-as-root -np ${NUM_PROCS} hostname ERROR_VARIABLE CHECK_ALLOW_RUN_AS_ROOT_RESULTS ERROR_STRIP_TRAILING_WHITESPACE OUTPUT_QUIET)
+  if ("${CHECK_ALLOW_RUN_AS_ROOT_RESULTS}" STREQUAL "")
+    set(MPI_EXEC_CMD_ARGS "--allow-run-as-root")
+  endif()
+  
+  add_test(NAME MPIApiTest COMMAND ${MPIEXEC} ${MPI_EXEC_CMD_ARGS} -np ${NUM_PROCS} ${CMAKE_BINARY_DIR}/unittests/test_mpi_plugin)
+endif()
 
 add_subdirectory(backends)
 add_subdirectory(Optimizer)
@@ -180,6 +253,4 @@ if (CUDAQ_ENABLE_PYTHON)
   gtest_discover_tests(test_domains
     TEST_SUFFIX _Sampling PROPERTIES ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python")
 endif()
-
-add_subdirectory(plugin)
 

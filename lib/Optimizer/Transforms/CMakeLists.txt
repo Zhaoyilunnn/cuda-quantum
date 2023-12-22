@@ -13,26 +13,33 @@ endif()
 add_cudaq_library(OptTransforms
   AddDeallocs.cpp
   AggressiveEarlyInlining.cpp
+  ApplyControlNegations.cpp
   ApplyOpSpecialization.cpp
   BasisConversion.cpp
   CombineQuantumAlloc.cpp
   Decomposition.cpp
   DecompositionPatterns.cpp
+  DelayMeasurements.cpp
   ExpandMeasurements.cpp
   FactorQuantumAlloc.cpp
   GenKernelExecution.cpp
   GenDeviceCodeLoader.cpp
   LambdaLifting.cpp
+  LinearCtrlRelations.cpp
   LoopAnalysis.cpp
   LoopNormalize.cpp
+  LoopPeeling.cpp
   LoopUnroll.cpp
   LowerToCFG.cpp
   LowerUnwind.cpp
+  Mapping.cpp
   MemToReg.cpp
   MultiControlDecomposition.cpp
+  ObserveAnsatz.cpp
+  PruneCtrlRelations.cpp
   QuakeAddMetadata.cpp
-  QuakeObserveAnsatz.cpp
   QuakeSynthesizer.cpp
+  RefToVeqAlloc.cpp
   RegToMem.cpp
 
   DEPENDS

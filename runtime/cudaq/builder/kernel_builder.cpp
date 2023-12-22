@@ -95,11 +95,6 @@ KernelBuilderType mapArgToType(cudaq::qubit &e) {
       [](MLIRContext *ctx) { return quake::RefType::get(ctx); });
 }
 
-KernelBuilderType mapArgToType(cudaq::qreg<> &e) {
-  return KernelBuilderType(
-      [](MLIRContext *ctx) { return quake::VeqType::getUnsized(ctx); });
-}
-
 KernelBuilderType mapArgToType(cudaq::qvector<> &e) {
   return KernelBuilderType(
       [](MLIRContext *ctx) { return quake::VeqType::getUnsized(ctx); });
@@ -161,6 +156,39 @@ void deleteBuilder(ImplicitLocOpBuilder *builder) { delete builder; }
 
 bool isArgStdVec(std::vector<QuakeValue> &args, std::size_t idx) {
   return args[idx].isStdVec();
+}
+
+void exp_pauli(ImplicitLocOpBuilder &builder, const QuakeValue &theta,
+               const std::vector<QuakeValue> &qubits,
+               const std::string &pauliWord) {
+  Value qubitsVal;
+  if (qubits.size() == 1)
+    qubitsVal = qubits.front().getValue();
+  else {
+    // we have a vector of quake value qubits, need to concat them
+    SmallVector<Value> values;
+    for (auto &v : qubits)
+      values.push_back(v.getValue());
+
+    qubitsVal = builder.create<quake::ConcatOp>(
+        quake::VeqType::get(builder.getContext(), qubits.size()), values);
+  }
+
+  auto thetaVal = theta.getValue();
+  if (!isa<quake::VeqType>(qubitsVal.getType()))
+    throw std::runtime_error(
+        "exp_pauli must take a QuakeValue of veq type as second argument.");
+  if (!thetaVal.getType().isIntOrFloat())
+    throw std::runtime_error("exp_pauli must take a QuakeValue of float/int "
+                             "type as first argument.");
+  cudaq::info("kernel_builder apply exp_pauli {}", pauliWord);
+
+  auto strLitTy = cc::PointerType::get(cc::ArrayType::get(
+      builder.getContext(), builder.getI8Type(), pauliWord.size() + 1));
+  Value stringLiteral = builder.create<cc::CreateStringLiteralOp>(
+      strLitTy, builder.getStringAttr(pauliWord));
+  SmallVector<Value> args{thetaVal, qubitsVal, stringLiteral};
+  builder.create<quake::ExpPauliOp>(TypeRange{}, args);
 }
 
 /// @brief Search the given `FuncOp` for all `CallOps` recursively.
@@ -377,7 +405,7 @@ void forLoop(ImplicitLocOpBuilder &builder, Value &startVal, Value &end,
           Block &block) {
         Value iv = block.getArgument(0);
         // shift iv -> iv + start
-        iv = builder.create<arith::AddIOp>(iv.getType(), iv, startVal);
+        iv = builder.create<arith::AddIOp>(iv.getType(), iv, castStart);
         OpBuilder::InsertionGuard guard(nestedBuilder);
         QuakeValue idxQuakeVal(builder, iv);
         body(idxQuakeVal);
@@ -449,9 +477,16 @@ QuakeValue qalloc(ImplicitLocOpBuilder &builder, QuakeValue &size) {
   return QuakeValue(builder, qubits);
 }
 
+QuakeValue constantVal(ImplicitLocOpBuilder &builder, double val) {
+  llvm::APFloat d(val);
+  Value constant =
+      builder.create<arith::ConstantFloatOp>(d, builder.getF64Type());
+  return QuakeValue(builder, constant);
+}
+
 template <typename QuakeOp>
-void handleOneQubitBroadcast(ImplicitLocOpBuilder &builder, Value veq,
-                             bool adjoint = false) {
+void handleOneQubitBroadcast(ImplicitLocOpBuilder &builder, auto param,
+                             Value veq, bool adjoint = false) {
   cudaq::info("kernel_builder handling operation broadcast on qvector.");
 
   auto loc = builder.getLoc();
@@ -463,7 +498,7 @@ void handleOneQubitBroadcast(ImplicitLocOpBuilder &builder, Value veq,
     Value ref =
         builder.create<quake::ExtractRefOp>(loc, veq, block.getArgument(0));
 
-    builder.create<QuakeOp>(loc, adjoint, ValueRange(), ValueRange(), ref);
+    builder.create<QuakeOp>(loc, adjoint, param, ValueRange(), ref);
   };
   cudaq::opt::factory::createInvariantLoop(builder, loc, rank, bodyBuilder);
 }
@@ -484,7 +519,8 @@ void applyOneQubitOp(ImplicitLocOpBuilder &builder, auto &&params, auto &&ctrls,
       if (!ctrls.empty())                                                      \
         throw std::runtime_error(                                              \
             "Cannot specify controls for a veq broadcast.");                   \
-      handleOneQubitBroadcast<quake::QUAKENAME>(builder, target.getValue());   \
+      handleOneQubitBroadcast<quake::QUAKENAME>(builder, ValueRange(),         \
+                                                target.getValue());            \
       return;                                                                  \
     }                                                                          \
     std::vector<Value> ctrlValues;                                             \
@@ -506,11 +542,20 @@ CUDAQ_ONE_QUBIT_IMPL(z, ZOp)
             std::vector<QuakeValue> &ctrls, QuakeValue &target) {              \
     cudaq::info("kernel_builder apply {}", std::string(#NAME));                \
     Value value = target.getValue();                                           \
+    auto type = value.getType();                                               \
+    if (type.isa<quake::VeqType>()) {                                          \
+      if (!ctrls.empty())                                                      \
+        throw std::runtime_error(                                              \
+            "Cannot specify controls for a veq broadcast.");                   \
+      handleOneQubitBroadcast<quake::QUAKENAME>(builder, parameter.getValue(), \
+                                                target.getValue());            \
+      return;                                                                  \
+    }                                                                          \
     std::vector<Value> ctrlValues;                                             \
     std::transform(ctrls.begin(), ctrls.end(), std::back_inserter(ctrlValues), \
                    [](auto &el) { return el.getValue(); });                    \
     applyOneQubitOp<quake::QUAKENAME>(builder, parameter.getValue(),           \
-                                      ctrlValues, value);                      \
+                                      ctrlValues, value, false);               \
   }
 
 CUDAQ_ONE_QUBIT_PARAM_IMPL(rx, RxOp)
@@ -528,10 +573,14 @@ QuakeValue applyMeasure(ImplicitLocOpBuilder &builder, Value value,
   cudaq::info("kernel_builder apply measurement");
 
   auto i1Ty = builder.getI1Type();
+  auto strAttr = builder.getStringAttr(regName);
+  auto measTy = quake::MeasureType::get(builder.getContext());
   if (type.isa<quake::RefType>()) {
-    Value measureResult = builder.template create<QuakeMeasureOp>(
-        i1Ty, value, builder.getStringAttr(regName));
-    return QuakeValue(builder, measureResult);
+    Value measureResult =
+        builder.template create<QuakeMeasureOp>(measTy, value, strAttr)
+            .getMeasOut();
+    Value bits = builder.create<quake::DiscriminateOp>(i1Ty, measureResult);
+    return QuakeValue(builder, bits);
   }
 
   // This must be a veq.
@@ -548,7 +597,11 @@ QuakeValue applyMeasure(ImplicitLocOpBuilder &builder, Value value,
         OpBuilder::InsertionGuard guard(nestedBuilder);
         Value qv =
             nestedBuilder.create<quake::ExtractRefOp>(nestedLoc, value, iv);
-        Value bit = nestedBuilder.create<QuakeMeasureOp>(nestedLoc, i1Ty, qv);
+        Value meas =
+            nestedBuilder.create<QuakeMeasureOp>(nestedLoc, measTy, qv, strAttr)
+                .getMeasOut();
+        Value bit =
+            nestedBuilder.create<quake::DiscriminateOp>(nestedLoc, i1Ty, meas);
 
         auto i64Ty = nestedBuilder.getIntegerType(64);
         auto intIv =
@@ -632,8 +685,10 @@ void c_if(ImplicitLocOpBuilder &builder, QuakeValue &conditional,
           std::function<void()> &thenFunctor) {
   auto value = conditional.getValue();
 
-  if (auto measureOp = value.getDefiningOp<quake::MeasurementInterface>())
-    checkAndUpdateRegName(measureOp);
+  if (auto discrOp = value.getDefiningOp<quake::DiscriminateOp>())
+    if (auto measureOp = discrOp.getMeasurement()
+                             .getDefiningOp<quake::MeasurementInterface>())
+      checkAndUpdateRegName(measureOp);
 
   auto type = value.getType();
   if (!type.isa<mlir::IntegerType>() || type.getIntOrFloatBitWidth() != 1)
@@ -740,6 +795,7 @@ jitCode(ImplicitLocOpBuilder &builder, ExecutionEngine *jit,
 
   PassManager pm(context);
   OpPassManager &optPM = pm.nest<func::FuncOp>();
+  optPM.addPass(cudaq::opt::createUnwindLoweringPass());
   cudaq::opt::addAggressiveEarlyInlining(pm);
   pm.addPass(createCanonicalizerPass());
   pm.addPass(cudaq::opt::createApplyOpSpecializationPass());
@@ -751,7 +807,6 @@ jitCode(ImplicitLocOpBuilder &builder, ExecutionEngine *jit,
   pm.addPass(createCanonicalizerPass());
   optPM.addPass(cudaq::opt::createQuakeAddDeallocs());
   optPM.addPass(cudaq::opt::createQuakeAddMetadata());
-  optPM.addPass(cudaq::opt::createUnwindLoweringPass());
   pm.addPass(createCanonicalizerPass());
   pm.addPass(createCSEPass());
 

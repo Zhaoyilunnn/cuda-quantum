@@ -22,12 +22,23 @@ static bool isQuantumType(Type t) {
   return isa<quake::VeqType, quake::RefType>(t);
 }
 
-static bool isArithmeticSequenceType(Type t) {
-  if (auto vec = dyn_cast<cudaq::cc::StdvecType>(t))
-    return isArithmeticType(vec.getElementType());
-  if (auto vec = dyn_cast<cudaq::cc::ArrayType>(t))
-    return isArithmeticType(vec.getElementType());
+// Allow array of [array of]* T, where T is arithmetic.
+static bool isStaticArithmeticSequenceType(Type t) {
+  if (auto vec = dyn_cast<cudaq::cc::ArrayType>(t)) {
+    auto eleTy = vec.getElementType();
+    return isArithmeticType(eleTy) || isStaticArithmeticSequenceType(eleTy);
+  }
   return false;
+}
+
+// Allow vector of [vector of]* [array of]* T or
+//       array of [array of]* T, where T is arithmetic.
+static bool isArithmeticSequenceType(Type t) {
+  if (auto vec = dyn_cast<cudaq::cc::StdvecType>(t)) {
+    auto eleTy = vec.getElementType();
+    return isArithmeticType(eleTy) || isArithmeticSequenceType(eleTy);
+  }
+  return isStaticArithmeticSequenceType(t);
 }
 
 static bool isKernelSignatureType(FunctionType t);
@@ -81,6 +92,7 @@ QuakeBridgeVisitor::findCallOperator(const clang::CXXRecordDecl *decl) {
 
 bool QuakeBridgeVisitor::TraverseRecordType(clang::RecordType *t) {
   auto *recDecl = t->getDecl();
+
   if (ignoredClass(recDecl))
     return true;
   auto reci = records.find(t);
@@ -103,10 +115,16 @@ bool QuakeBridgeVisitor::TraverseRecordType(clang::RecordType *t) {
   if (!result)
     return false;
   if (typeStack.size() != typeStackDepth + 1) {
-    assert(typeStack.size() == typeStackDepth);
-    if (allowUnknownRecordType)
+    if (allowUnknownRecordType) {
+      // This is a kernel's type signature, so add a NoneType. When finally
+      // returning out of determining the kernel's type signature, a clang error
+      // diagnsotic will be reported.
       pushType(noneTy);
-    else {
+    } else if (typeStack.size() != typeStackDepth) {
+      emitWarning(toLocation(recDecl),
+                  "compiler encountered type traversal issue");
+      return false;
+    } else {
       recDecl->dump();
       emitFatalError(toLocation(recDecl), "expected a type");
     }
@@ -256,6 +274,11 @@ bool QuakeBridgeVisitor::VisitRValueReferenceType(
   return pushType(cc::PointerType::get(eleTy));
 }
 
+bool QuakeBridgeVisitor::VisitConstantArrayType(clang::ConstantArrayType *t) {
+  auto size = t->getSize().getZExtValue();
+  return pushType(cc::ArrayType::get(builder.getContext(), popType(), size));
+}
+
 bool QuakeBridgeVisitor::pushType(Type t) {
   LLVM_DEBUG(llvm::dbgs() << std::string(typeStack.size(), ' ') << "push " << t
                           << '\n');
@@ -306,7 +329,7 @@ bool QuakeBridgeVisitor::doSyntaxChecks(const clang::FunctionDecl *x) {
     // device kernels may take veq and/or ref arguments.
     if (isArithmeticType(t) || isArithmeticSequenceType(t) ||
         isQuantumType(t) || isKernelCallable(t) || isFunctionCallable(t) ||
-        isReferenceToCallableRecord(t, p))
+        isCharPointerType(t) || isReferenceToCallableRecord(t, p))
       continue;
     reportClangError(p, mangler, "kernel argument type not supported");
     return false;

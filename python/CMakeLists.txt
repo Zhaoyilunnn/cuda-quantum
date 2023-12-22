@@ -56,7 +56,7 @@ target_link_libraries(_pycudaq
       nvqir
       cudaq 
       cudaq-builder 
-      cudaq-em-qir 
+      cudaq-em-default 
       cudaq-platform-default 
       cudaq-py-utils)
 
@@ -72,6 +72,7 @@ else()
   install(TARGETS _pycudaq LIBRARY DESTINATION cudaq)
 endif()
 
+add_subdirectory(runtime/cudaq/distributed)
 if (NOT CUDAQ_DISABLE_CPP_FRONTEND)
   add_subdirectory(runtime/cudaq/domains/plugins)
 endif()

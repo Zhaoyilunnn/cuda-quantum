@@ -133,7 +133,7 @@ CUDAQ_TEST(KernelsTester, checkFromState) {
     using namespace cudaq::spin;
     auto H = 5.907 - 2.1433 * x(0) * x(1) - 2.1433 * y(0) * y(1) +
              .21829 * z(0) - 6.125 * z(1);
-    auto energy = cudaq::observe(kernel, H).exp_val_z();
+    auto energy = cudaq::observe(kernel, H).expectation();
     EXPECT_NEAR(-1.748, energy, 1e-3);
 
     auto ss = cudaq::get_state(kernel);
@@ -155,7 +155,8 @@ CUDAQ_TEST(KernelsTester, checkFromState) {
   {
     // Random unitary state
     const std::size_t numQubits = 2;
-    auto randHam = cudaq::spin_op::random(numQubits, numQubits * numQubits);
+    auto randHam = cudaq::spin_op::random(numQubits, numQubits * numQubits,
+                                          std::mt19937::default_seed);
     auto eigenVectors = randHam.to_matrix().eigenvectors();
     // Map the ground state to a cudaq::state
     std::vector<std::complex<double>> expectedData(eigenVectors.rows());

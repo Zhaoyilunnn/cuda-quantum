@@ -18,7 +18,7 @@
 
 struct deuteron_n3_ansatz {
   void operator()(double x0, double x1) __qpu__ {
-    cudaq::qreg q(3);
+    cudaq::qvector q(3);
     x(q[0]);
     ry(x0, q[1]);
     ry(x1, q[2]);
@@ -59,6 +59,7 @@ int main() {
   cudaq::gradients::parameter_shift gradient(deuteron_n3_ansatz{}, argMapper);
   gradient.shiftScalar = 1e-1;
   cudaq::optimizers::lbfgs optimizer_lbfgs;
+  optimizer_lbfgs.max_line_search_trials = 10;
   auto [opt_val2, opt_params2] = optimizer_lbfgs.optimize(
       2, [&](const std::vector<double> &x, std::vector<double> &grad_vec) {
         double e = cudaq::observe(deuteron_n3_ansatz{}, h3, x[0], x[1]);

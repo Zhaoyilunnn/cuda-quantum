@@ -9,6 +9,7 @@
 #include "cudaq/Optimizer/Dialect/Quake/QuakeOps.h"
 #include "cudaq/Optimizer/Dialect/CC/CCTypes.h"
 #include "cudaq/Optimizer/Dialect/Quake/QuakeDialect.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
@@ -23,15 +24,119 @@ namespace {
 #include "cudaq/Optimizer/Dialect/Quake/Canonical.inc"
 } // namespace
 
-namespace quake {
-template <typename ConcreteType>
-class QuantumTrait : public OpTrait::TraitBase<ConcreteType, QuantumTrait> {};
-} // namespace quake
-
+// Is \p op in the Quake dialect?
+// TODO: Is this StringRef comparison faster than calling MLIRContext::
+// getLoadedDialect("quake")?
 static bool isQuakeOperation(Operation *op) {
   if (auto *dialect = op->getDialect())
     return dialect->getNamespace().equals("quake");
   return false;
+}
+
+// If a wire value is used more than once but in distinct blocks, assume that
+// the uses are dynamically mutually exclusive. This is an approximation and not
+// sufficient to prove the value has a linear type.
+// TODO: implement an analysis that proves the control-flow to the blocks is
+// mutually exclusive (a then and an else block, for example).
+inline static bool allUsesInDistinctBlocks(Operation *defOp, Value v) {
+  SmallPtrSet<Block *, 4> blockSet;
+  for (Operation *u : v.getUsers()) {
+    // If `u` is not in quake, then it is not a quantum operation. Skip it.
+    if (!isQuakeOperation(u))
+      continue;
+    Block *b = u->getBlock();
+    if (blockSet.count(b))
+      return false;
+    blockSet.insert(b);
+  }
+  return true;
+}
+
+static LogicalResult verifyWireResultsAreLinear(Operation *op) {
+  for (Value v : op->getOpResults())
+    if (isa<quake::WireType>(v.getType())) {
+      // Terminators can forward wire values, but they are not quantum
+      // operations.
+      if (v.hasOneUse() || allUsesInDistinctBlocks(op, v))
+        continue;
+      return op->emitOpError(
+          "wires are a linear type and must have exactly one use");
+    }
+  return success();
+}
+
+/// When a quake operation is in value form, the number of wire arguments (wire
+/// arity) must be the same as the number of wires returned as results (wire
+/// coarity). This function verifies that this property is true.
+LogicalResult quake::verifyWireArityAndCoarity(Operation *op) {
+  std::size_t arity = 0;
+  std::size_t coarity = 0;
+  auto getCounts = [&](auto op) {
+    for (auto arg : op.getTargets())
+      if (isa<quake::WireType>(arg.getType()))
+        ++arity;
+    coarity = op.getWires().size();
+  };
+  if (auto gate = dyn_cast<OperatorInterface>(op)) {
+    for (auto arg : gate.getControls())
+      if (isa<quake::WireType>(arg.getType()))
+        ++arity;
+    getCounts(gate);
+  } else if (auto meas = dyn_cast<MeasurementInterface>(op)) {
+    getCounts(meas);
+  }
+  if (arity == coarity)
+    return success();
+  return op->emitOpError("arity does not equal coarity of wires");
+}
+
+bool quake::isSupportedMappingOperation(Operation *op) {
+  return isa<OperatorInterface, MeasurementInterface, SinkOp>(op);
+}
+
+mlir::ValueRange quake::getQuantumTypesFromRange(mlir::ValueRange range) {
+
+  // Skip over classical types at the beginning
+  int numClassical = 0;
+  for (auto operand : range) {
+    if (!isa<RefType, VeqType, WireType>(operand.getType()))
+      numClassical++;
+    else
+      break;
+  }
+
+  mlir::ValueRange retVals = range.drop_front(numClassical);
+
+  // Make sure all remaining operands are quantum
+  for (auto operand : retVals)
+    if (!isa<RefType, VeqType, WireType>(operand.getType()))
+      return retVals.drop_front(retVals.size());
+
+  return retVals;
+}
+
+mlir::ValueRange quake::getQuantumResults(Operation *op) {
+  return getQuantumTypesFromRange(op->getResults());
+}
+
+mlir::ValueRange quake::getQuantumOperands(Operation *op) {
+  return getQuantumTypesFromRange(op->getOperands());
+}
+
+LogicalResult quake::setQuantumOperands(Operation *op, ValueRange quantumVals) {
+  mlir::ValueRange quantumOperands =
+      getQuantumTypesFromRange(op->getOperands());
+
+  if (quantumOperands.size() != quantumVals.size())
+    return failure();
+
+  // Count how many classical operands at beginning
+  auto numClassical = op->getOperands().size() - quantumOperands.size();
+
+  for (auto &&[i, quantumVal] : llvm::enumerate(quantumVals))
+    op->setOperand(numClassical + i, quantumVal);
+
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -87,6 +192,96 @@ void quake::AllocaOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
   // changes the type. Uses may still expect a veq with unspecified size.
   // Folding is strictly reductive and doesn't allow the creation of ops.
   patterns.add<FuseConstantToAllocaPattern>(context);
+}
+
+//===----------------------------------------------------------------------===//
+// Apply
+//===----------------------------------------------------------------------===//
+
+void quake::ApplyOp::print(OpAsmPrinter &p) {
+  if (getIsAdj())
+    p << "<adj>";
+  p << ' ';
+  bool isDirect = getCallee().has_value();
+  if (isDirect)
+    p.printAttributeWithoutType(getCalleeAttr());
+  else
+    p << getIndirectCallee();
+  p << ' ';
+  if (!getControls().empty())
+    p << '[' << getControls() << "] ";
+  p << getArgs() << " : ";
+  SmallVector<Type> operandTys{(*this)->getOperandTypes().begin(),
+                               (*this)->getOperandTypes().end()};
+  p.printFunctionalType(ArrayRef<Type>{operandTys}.drop_front(isDirect ? 0 : 1),
+                        (*this)->getResultTypes());
+  p.printOptionalAttrDict(
+      (*this)->getAttrs(),
+      {"operand_segment_sizes", "is_adj", getCalleeAttrNameStr()});
+}
+
+ParseResult quake::ApplyOp::parse(OpAsmParser &parser, OperationState &result) {
+  if (succeeded(parser.parseOptionalLess())) {
+    if (parser.parseKeyword("adj") || parser.parseGreater())
+      return failure();
+    result.addAttribute("is_adj", parser.getBuilder().getUnitAttr());
+  }
+  SmallVector<OpAsmParser::UnresolvedOperand> calleeOperand;
+  if (parser.parseOperandList(calleeOperand))
+    return failure();
+  bool isDirect = calleeOperand.empty();
+  if (calleeOperand.size() > 1)
+    return failure();
+  if (isDirect) {
+    NamedAttrList attrs;
+    SymbolRefAttr funcAttr;
+    if (parser.parseCustomAttributeWithFallback(
+            funcAttr, parser.getBuilder().getType<NoneType>(),
+            getCalleeAttrNameStr(), attrs))
+      return failure();
+    result.addAttribute(getCalleeAttrNameStr(), funcAttr);
+  }
+
+  SmallVector<OpAsmParser::UnresolvedOperand> controlOperands;
+  if (succeeded(parser.parseOptionalLSquare()))
+    if (parser.parseOperandList(controlOperands) || parser.parseRSquare())
+      return failure();
+
+  SmallVector<OpAsmParser::UnresolvedOperand> miscOperands;
+  if (parser.parseOperandList(miscOperands) || parser.parseColon())
+    return failure();
+
+  FunctionType applyTy;
+  if (parser.parseType(applyTy) ||
+      parser.parseOptionalAttrDict(result.attributes))
+    return failure();
+  result.addAttribute("operand_segment_sizes",
+                      parser.getBuilder().getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(calleeOperand.size()),
+                           static_cast<int32_t>(controlOperands.size()),
+                           static_cast<int32_t>(miscOperands.size())}));
+  result.addTypes(applyTy.getResults());
+  if (isDirect) {
+    if (parser.resolveOperands(
+            llvm::concat<const OpAsmParser::UnresolvedOperand>(
+                calleeOperand, controlOperands, miscOperands),
+            applyTy.getInputs(), parser.getNameLoc(), result.operands))
+      return failure();
+  } else {
+    auto loc = parser.getNameLoc();
+    auto fnTy = parser.getBuilder().getFunctionType(
+        applyTy.getInputs().drop_front(controlOperands.size()),
+        applyTy.getResults());
+    auto callableTy = cudaq::cc::CallableType::get(parser.getContext(), fnTy);
+    if (parser.resolveOperands(calleeOperand, callableTy, loc,
+                               result.operands) ||
+        parser.resolveOperands(
+            llvm::concat<const OpAsmParser::UnresolvedOperand>(controlOperands,
+                                                               miscOperands),
+            applyTy.getInputs(), loc, result.operands))
+      return failure();
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -272,8 +467,15 @@ LogicalResult quake::ExtractRefOp::verify() {
       return emitOpError(
           "must not have both a constant index and an index argument.");
   } else {
-    if (getRawIndex() == kDynamicIndex)
+    if (getRawIndex() == kDynamicIndex) {
       return emitOpError("invalid constant index value");
+    } else {
+      auto veqSize = getVeq().getType().getSize();
+      if (getVeq().getType().hasSpecifiedSize() && getRawIndex() >= veqSize)
+        return emitOpError("invalid index [" + std::to_string(getRawIndex()) +
+                           "] because >= size [" + std::to_string(veqSize) +
+                           "]");
+    }
   }
   return success();
 }
@@ -319,6 +521,49 @@ void quake::RelaxSizeOp::getCanonicalizationPatterns(
 // SubVeqOp
 //===----------------------------------------------------------------------===//
 
+struct RemoveSubVeqNoOpPattern : public OpRewritePattern<quake::SubVeqOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(quake::SubVeqOp subVeqOp,
+                                PatternRewriter &rewriter) const override {
+    // Replace subveq operations that extract the entire original register
+    // with the original register.
+    auto origVeq = subVeqOp.getVeq();
+    auto low = subVeqOp.getLow();
+    auto high = subVeqOp.getHigh();
+
+    // The start of the subveq must be known
+    auto arithLow = low.getDefiningOp<arith::ConstantIntOp>();
+    if (!arithLow)
+      return failure();
+
+    // The end of the subveq must be known
+    auto arithHigh = high.getDefiningOp<arith::ConstantIntOp>();
+    if (!arithHigh)
+      return failure();
+
+    // The original veq size must be known
+    auto veqType = dyn_cast<quake::VeqType>(origVeq.getType());
+    if (!veqType.hasSpecifiedSize())
+      return failure();
+
+    // If the subveq is the whole register, than the
+    // start value must be 0
+    if (arithLow.value() != 0)
+      return failure();
+
+    // If the sizes are equal, then replace
+    if (static_cast<int64_t>(veqType.getSize()) == arithHigh.value() + 1) {
+      // this subveq is the whole original register, hence a no-op
+      rewriter.replaceOp(subVeqOp, origVeq);
+      return success();
+    }
+
+    // All else fail
+    return failure();
+  }
+};
+
 Value quake::createSizedSubVeqOp(PatternRewriter &builder, Location loc,
                                  OpResult result, Value inVec, Value lo,
                                  Value hi) {
@@ -337,7 +582,7 @@ Value quake::createSizedSubVeqOp(PatternRewriter &builder, Location loc,
 
 void quake::SubVeqOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
                                                   MLIRContext *context) {
-  patterns.add<FuseConstantToSubveqPattern>(context);
+  patterns.add<FuseConstantToSubveqPattern, RemoveSubVeqNoOpPattern>(context);
 }
 
 //===----------------------------------------------------------------------===//
@@ -355,7 +600,8 @@ void quake::VeqSizeOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 
 namespace {
 // If there is no operation that modifies the wire after it gets unwrapped and
-// before it is wrapped, then the wrap operation is a nop and can be eliminated.
+// before it is wrapped, then the wrap operation is a nop and can be
+// eliminated.
 struct KillDeadWrapPattern : public OpRewritePattern<quake::WrapOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -381,34 +627,55 @@ void quake::WrapOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
 static LogicalResult verifyMeasurements(Operation *const op,
                                         TypeRange targetsType,
                                         const Type bitsType) {
+  if (failed(verifyWireResultsAreLinear(op)))
+    return failure();
   bool mustBeStdvec =
       targetsType.size() > 1 ||
-      (targetsType.size() == 1 && targetsType[0].isa<quake::VeqType>());
+      (targetsType.size() == 1 && isa<quake::VeqType>(targetsType[0]));
   if (mustBeStdvec) {
-    if (!op->getResult(0).getType().isa<cudaq::cc::StdvecType>())
-      return op->emitOpError("must return `!cc.stdvec<i1>`, when measuring a "
-                             "qreg, a series of qubits, or both");
+    if (!isa<cudaq::cc::StdvecType>(op->getResult(0).getType()))
+      return op->emitOpError("must return `!cc.stdvec<!quake.measure>`, when "
+                             "measuring a qreg, a series of qubits, or both");
   } else {
-    if (!op->getResult(0).getType().isa<IntegerType>())
+    if (!isa<quake::MeasureType>(op->getResult(0).getType()))
       return op->emitOpError(
-          "must return `i1` when measuring exactly one qubit");
+          "must return `!quake.measure` when measuring exactly one qubit");
   }
   return success();
 }
 
 LogicalResult quake::MxOp::verify() {
   return verifyMeasurements(getOperation(), getTargets().getType(),
-                            getBits().getType());
+                            getMeasOut().getType());
 }
 
 LogicalResult quake::MyOp::verify() {
   return verifyMeasurements(getOperation(), getTargets().getType(),
-                            getBits().getType());
+                            getMeasOut().getType());
 }
 
 LogicalResult quake::MzOp::verify() {
   return verifyMeasurements(getOperation(), getTargets().getType(),
-                            getBits().getType());
+                            getMeasOut().getType());
+}
+
+//===----------------------------------------------------------------------===//
+// Discriminate
+//===----------------------------------------------------------------------===//
+
+LogicalResult quake::DiscriminateOp::verify() {
+  if (isa<cudaq::cc::StdvecType>(getMeasurement().getType())) {
+    auto stdvecTy = dyn_cast<cudaq::cc::StdvecType>(getResult().getType());
+    if (!stdvecTy || !isa<IntegerType>(stdvecTy.getElementType()))
+      return emitOpError("must return a !cc.stdvec<integral> type, when "
+                         "discriminating a qreg, a series of qubits, or both");
+  } else {
+    auto measTy = isa<quake::MeasureType>(getMeasurement().getType());
+    if (!measTy || !isa<IntegerType>(getResult().getType()))
+      return emitOpError(
+          "must return integral type when discriminating exactly one qubit");
+  }
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -480,6 +747,58 @@ void quake::RxOp::getOperatorMatrix(Matrix &matrix) {
                  -1i * std::sin(theta / 2.), std::cos(theta / 2.)});
 }
 
+namespace {
+template <typename OP>
+struct MergeRotationPattern : public OpRewritePattern<OP> {
+  using Base = OpRewritePattern<OP>;
+  using Base::Base;
+
+  LogicalResult matchAndRewrite(OP rotate,
+                                PatternRewriter &rewriter) const override {
+    auto wireTy = quake::WireType::get(rewriter.getContext());
+    if (rotate.getTarget(0).getType() != wireTy ||
+        !rotate.getControls().empty())
+      return failure();
+    assert(!rotate.getNegatedQubitControls());
+    auto input = rotate.getTarget(0).template getDefiningOp<OP>();
+    if (!input || !input.getControls().empty())
+      return failure();
+    assert(!input.getNegatedQubitControls());
+
+    // At this point, we have
+    //   %input  = quake.rotate %angle1, %wire
+    //   %rotate = quake.rotate %angle2, %input
+    // Replace those ops with
+    //   %new    = quake.rotate (%angle1 + %angle2), %wire
+    auto loc = rotate.getLoc();
+    auto angle1 = input.getParameter(0);
+    auto angle2 = rotate.getParameter(0);
+    if (angle1.getType() != angle2.getType())
+      return failure();
+    auto adjAttr = rotate.getIsAdjAttr();
+    auto newAngle = [&]() -> Value {
+      if (input.isAdj() == rotate.isAdj())
+        return rewriter.create<arith::AddFOp>(loc, angle1, angle2);
+      // One is adjoint, so it should be subtracted from the other.
+      if (input.isAdj())
+        return rewriter.create<arith::SubFOp>(loc, angle2, angle1);
+      adjAttr = input.getIsAdjAttr();
+      return rewriter.create<arith::SubFOp>(loc, angle1, angle2);
+    }();
+    rewriter.replaceOpWithNewOp<OP>(rotate, rotate.getResultTypes(), adjAttr,
+                                    ValueRange{newAngle}, ValueRange{},
+                                    ValueRange{input.getTarget(0)},
+                                    rotate.getNegatedQubitControlsAttr());
+    return success();
+  }
+};
+} // namespace
+
+void quake::RxOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<MergeRotationPattern<quake::RxOp>>(context);
+}
+
 void quake::RyOp::getOperatorMatrix(Matrix &matrix) {
   // Get parameter
   double theta;
@@ -491,6 +810,11 @@ void quake::RyOp::getOperatorMatrix(Matrix &matrix) {
 
   matrix.assign({std::cos(theta / 2.), std::sin(theta / 2.),
                  -std::sin(theta / 2.), std::cos(theta / 2.)});
+}
+
+void quake::RyOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<MergeRotationPattern<quake::RyOp>>(context);
 }
 
 void quake::RzOp::getOperatorMatrix(Matrix &matrix) {
@@ -505,6 +829,11 @@ void quake::RzOp::getOperatorMatrix(Matrix &matrix) {
     theta *= -1;
 
   matrix.assign({std::exp(-1i * theta / 2.), 0, 0, std::exp(1i * theta / 2.)});
+}
+
+void quake::RzOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
+                                              MLIRContext *context) {
+  patterns.add<MergeRotationPattern<quake::RzOp>>(context);
 }
 
 void quake::SOp::getOperatorMatrix(Matrix &matrix) {
@@ -589,8 +918,8 @@ void quake::ZOp::getOperatorMatrix(Matrix &matrix) {
 //===----------------------------------------------------------------------===//
 
 /// Never inline a `quake.apply` of a variant form of a kernel. The apply
-/// operation must be rewritten to a call before it is inlined when the apply is
-/// a variant form.
+/// operation must be rewritten to a call before it is inlined when the apply
+/// is a variant form.
 bool cudaq::EnableInlinerInterface::isLegalToInline(Operation *call,
                                                     Operation *callable,
                                                     bool) const {
@@ -603,13 +932,13 @@ bool cudaq::EnableInlinerInterface::isLegalToInline(Operation *call,
 using EffectsVectorImpl =
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>;
 
-/// For an operation with modeless effects, the operation always has effects on
-/// the control and target quantum operands, whether those operands are in
+/// For an operation with modeless effects, the operation always has effects
+/// on the control and target quantum operands, whether those operands are in
 /// reference or value form. A operation with modeless effects is not removed
 /// when its result(s) is (are) unused.
-inline static void getModelessEffectsImpl(EffectsVectorImpl &effects,
-                                          ValueRange controls,
-                                          ValueRange targets) {
+[[maybe_unused]] inline static void
+getModelessEffectsImpl(EffectsVectorImpl &effects, ValueRange controls,
+                       ValueRange targets) {
   for (auto v : controls)
     effects.emplace_back(MemoryEffects::Read::get(), v,
                          SideEffects::DefaultResource::get());
@@ -621,12 +950,12 @@ inline static void getModelessEffectsImpl(EffectsVectorImpl &effects,
   }
 }
 
-/// For an operation with moded effects, the operation conditionally has effects
-/// on the control and target quantum operands. If those operands are in
-/// reference form, then the operation does have effects on those references.
-/// Control operands have a read effect, while target operands have both a read
-/// and write effect. If the operand is in value form, the operation introduces
-/// no effects on that operand.
+/// For an operation with moded effects, the operation conditionally has
+/// effects on the control and target quantum operands. If those operands are
+/// in reference form, then the operation does have effects on those
+/// references. Control operands have a read effect, while target operands
+/// have both a read and write effect. If the operand is in value form, the
+/// operation introduces no effects on that operand.
 inline static void getModedEffectsImpl(EffectsVectorImpl &effects,
                                        ValueRange controls,
                                        ValueRange targets) {
@@ -646,13 +975,13 @@ inline static void getModedEffectsImpl(EffectsVectorImpl &effects,
 /// Quake reset has modeless effects.
 void quake::getResetEffectsImpl(EffectsVectorImpl &effects,
                                 ValueRange targets) {
-  getModelessEffectsImpl(effects, {}, targets);
+  getModedEffectsImpl(effects, {}, targets);
 }
 
-/// Quake measurement operations have modeless effects.
+/// Quake measurement operations have moded effects.
 void quake::getMeasurementEffectsImpl(EffectsVectorImpl &effects,
                                       ValueRange targets) {
-  getModelessEffectsImpl(effects, {}, targets);
+  getModedEffectsImpl(effects, {}, targets);
 }
 
 /// Quake quantum operators have moded effects.
@@ -669,6 +998,8 @@ void quake::getOperatorEffectsImpl(EffectsVectorImpl &effects,
   MACRO(R1Op) MACRO(RxOp) MACRO(RyOp) MACRO(RzOp) MACRO(PhasedRxOp)
 #define MEASURE_OPS(MACRO) MACRO(MxOp) MACRO(MyOp) MACRO(MzOp)
 #define QUANTUM_OPS(MACRO) MACRO(ResetOp) GATE_OPS(MACRO) MEASURE_OPS(MACRO)
+#define WIRE_OPS(MACRO) MACRO(FromControlOp) MACRO(ResetOp) MACRO(NullWireOp)  \
+  MACRO(UnwrapOp)
 // clang-format on
 #define INSTANTIATE_CALLBACKS(Op)                                              \
   void quake::Op::getEffects(                                                  \
@@ -678,6 +1009,15 @@ void quake::getOperatorEffectsImpl(EffectsVectorImpl &effects,
   }
 
 QUANTUM_OPS(INSTANTIATE_CALLBACKS)
+
+#define INSTANTIATE_LINEAR_TYPE_VERIFY(Op)                                     \
+  LogicalResult quake::Op::verify() {                                          \
+    return verifyWireResultsAreLinear(getOperation());                         \
+  }
+
+#define VERIFY_OPS(MACRO) GATE_OPS(MACRO) WIRE_OPS(MACRO)
+
+VERIFY_OPS(INSTANTIATE_LINEAR_TYPE_VERIFY)
 
 //===----------------------------------------------------------------------===//
 // Generated logic

@@ -143,17 +143,24 @@ private:
       }
     });
     func.walk([&](Operation *op) {
+      // FIXME: This really needs to figure out which operands are wires and
+      // which are not. It blindly assumes everything is a wire.
       if (isa<RAW_MEASURE_OPS>(op)) {
-        for (auto v : op->getOperands())
-          insertToEqClass(v);
+        for (auto [t, r] :
+             llvm::zip(op->getOperands(), op->getResults().drop_front()))
+          insertToEqClass(t, r);
       } else if (isa<RAW_GATE_OPS>(op)) {
         auto gate = cast<quake::OperatorInterface>(op);
-        for (auto c : gate.getControls())
-          insertToEqClass(c);
-        for (auto [t, r] : llvm::zip(gate.getTargets(), op->getResults()))
+        for (auto [t, r] : llvm::zip(gate.getControls(), op->getResults()))
+          insertToEqClass(t, r);
+        for (auto [t, r] :
+             llvm::zip(gate.getTargets(),
+                       op->getResults().drop_front(gate.getControls().size())))
           insertToEqClass(t, r);
       } else if (auto reset = dyn_cast<quake::ResetOp>(op)) {
         insertToEqClass(reset.getTargets(), reset.getResult(0));
+      } else if (auto sink = dyn_cast<quake::SinkOp>(op)) {
+        insertToEqClass(sink.getTarget());
       }
     });
     LLVM_DEBUG(llvm::dbgs() << "The cardinality " << cardinality
@@ -222,16 +229,23 @@ public:
     };
 
     if constexpr (quake::isMeasure<OP>) {
-      // Measurements consume quantum values, never returning them.
       auto args = collect(op.getOperands());
       auto nameAttr = op.getRegisterNameAttr();
-      rewriter.replaceOpWithNewOp<OP>(op, op.getType(), args, nameAttr);
+      eraseWrapUsers(op);
+      auto newOp = rewriter.create<OP>(
+          loc, ArrayRef<Type>{op.getMeasOut().getType()}, args, nameAttr);
+      op.getResult(0).replaceAllUsesWith(newOp.getResult(0));
+      rewriter.eraseOp(op);
     } else if constexpr (std::is_same_v<OP, quake::ResetOp>) {
       // Reset is a special case.
       auto targ = findLookupValue(op.getTargets());
       eraseWrapUsers(op);
       rewriter.create<quake::ResetOp>(loc, TypeRange{}, targ);
       rewriter.eraseOp(op);
+    } else if constexpr (std::is_same_v<OP, quake::SinkOp>) {
+      auto targ = findLookupValue(op.getTarget());
+      eraseWrapUsers(op);
+      rewriter.replaceOpWithNewOp<quake::DeallocOp>(op, targ);
     } else {
       auto ctrls = collect(op.getControls());
       auto targs = collect(op.getTargets());
@@ -302,11 +316,13 @@ public:
     // 4) Replace each gate pattern (either wrapped or value-ssa form) with a
     // gate in memory-ssa form.
     RewritePatternSet patterns(ctx);
-    patterns.insert<NOWRAP_QUANTUM_OPS, CollapseWrappers<quake::ResetOp>>(
-        ctx, analysis, allocas);
+    patterns.insert<NOWRAP_QUANTUM_OPS, CollapseWrappers<quake::ResetOp>,
+                    CollapseWrappers<quake::SinkOp>>(ctx, analysis, allocas);
     ConversionTarget target(*ctx);
     target.addDynamicallyLegalOp<RAW_QUANTUM_OPS, quake::ResetOp>(
         [](Operation *op) { return quake::isAllReferences(op); });
+    target.addIllegalOp<quake::SinkOp>();
+    target.addLegalOp<quake::DeallocOp>();
     if (failed(applyPartialConversion(func, target, std::move(patterns)))) {
       emitError(func.getLoc(), "error converting to memory form\n");
       signalPassFailure();

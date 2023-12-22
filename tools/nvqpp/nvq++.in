@@ -39,29 +39,62 @@ function add_pass_to_pipeline {
 }
 
 function list_targets {
-	ls -I *.cpp -1 ${install_dir}/targets/ | sed -e 's/\.config$//'
+	ls -I *.cpp -1 ${install_dir}/targets/ | grep ".config$" | sed -e 's/\.config$//'
 	exit 0
+}
+
+function list_simulators {
+	for file in $(grep -L "PLATFORM_QPU=" $(ls ${install_dir}/targets/*.config)) ; do
+		if ! grep -q "LIBRARY_MODE_EXECUTION_MANAGER=" $file ; then
+			echo $(basename $file | cut -d "." -f 1)
+		fi
+	done
+}
+
+function get_simulation_backend {
+	config_file="${install_dir}/targets/$1.config"
+	if [ -f "$config_file" ]; then
+    	line=$(grep "NVQIR_SIMULATION_BACKEND=" "$config_file")
+		if [ $? -eq 0 ]; then
+			echo ${line#*=} | tr -d '"'
+		fi
+	fi
+}
+
+function query_gpu {
+	if [ -x "$(command -v nvidia-smi)" ]; then
+		# Make sure nvidia-smi works.
+		nvidia-smi -L | grep 'Failed\|Error\|error\|failed' >/dev/null 2>&1
+		if [ $? != 0 ]; then
+			ngpus=$(nvidia-smi -L | wc -l)
+			if [ $((ngpus > 0)) != 0 ]; then
+				echo true
+				return
+			fi
+		fi
+	fi
+	echo false
 }
 
 function show_help {
 	cat - <<HELP
 --llvm-version=<vers>
 	Set the LLVM version suffix is <vers>.
-	
+
 --execution-manager=<mgr> | -em=<mgr> | -execution-manager=<mgr>
 	Set the execution manager to <mgr>.
-	
+
 --target=<target> | -target=<target>
 	Set the Target name to <target>.
 
---list-targets 
-    List the available targets NVQ++ can compile to. 
+--list-targets
+    List the available targets NVQ++ can compile to.
 
---emit-qir=<file> | -emit-qir=<file>
-	Emit the QIR output to <file>.
+--emit-qir | -emit-qir
+	Emit the QIR output to <input file>.qir.ll and exit.
 
 --emulate | -emulate
-   For physical, remote QPU execution, enable local emulation for testing. 
+   For physical, remote QPU execution, enable local emulation for testing.
 
 --platform=<lib> | -platform=<lib>
 	Set the platform library name to <lib>.
@@ -71,7 +104,7 @@ function show_help {
 
 -g
 	Enable debugging output.
-	
+
 --enable-mlir
 	Enable and generate MLIR code for CUDA Quantum kernels.
 
@@ -83,22 +116,31 @@ function show_help {
 
 --[no-]device-code-loading
 	Enable/disable device code loading pass.
-	
+
+--[no-]unwind-lowering
+	Enable/disable unwind lowering pass.
+
 --[no-]kernel-execution
 	Enable/disable kernel execution pass.
 
 --[no-]aggressive-early-inline
 	Enable/disable early inlining pass.
 
---[no-]quake-apply-specialization
+--[no-]apply-specialization
 	Enable/disable specialization of quake.apply ops.
 
 --[no-]lambda-lifting
 	Enable/disable lambda lifting pass.
 
+--opt-plugin <dynamic library file>
+	Load pass plugin by specifying its dynamic library.
+
+--opt-pass <pass name>
+	Append a pass to the pass pipeline by specifying its name in the pass pipeline syntax, e.g. <dialect>.<opname>(passname).
+
 --save-temps
 	Save temporary files.
-	
+
 -o=<obj>
 	Specify the output file.
 
@@ -107,7 +149,7 @@ function show_help {
 
 -L<dir> | -L <dir>
 	Add <dir> to the linker's library path.
-	
+
 -I<dir> | -I <dir>
 	Add a <dir> to the include path.
 
@@ -116,7 +158,7 @@ function show_help {
 
 -c
 	Compile only. Do not link.
-	
+
 -Wl<opt>
 	Linker options to be passed to the linker.
 
@@ -139,7 +181,7 @@ llvm_version="@LLVM_VERSION_MAJOR@.@LLVM_VERSION_MINOR@.@LLVM_VERSION_PATCH@"
 llvm_suffix="@NVQPP_LLVM_EXECUTABLE_SUFFIX@"
 
 IS_RELOCATABLE_INSTALL=@CUDAQ_RELOCATABLE_BOOL@
-INCLUDES=""
+INCLUDES="@CUDAQ_CXX_NVQPP_INCLUDE_STR@"
 
 # If we are a relocatable package, then we
 # want to re-divert llvm_install_dir to the install_dir
@@ -154,7 +196,7 @@ if [ ! -f "${install_dir}/include/cudaq.h" ]; then
 	# the build directory for testing.
 	if [ "@CMAKE_BINARY_DIR@" -ef "${install_dir}" ]; then
 		CUDAQ_INCLUDE_PATH="@CMAKE_SOURCE_DIR@/runtime"
-		INCLUDES="-I @CMAKE_SOURCE_DIR@/tpls/fmt/include"
+		INCLUDES="${INCLUDES} -I @CMAKE_SOURCE_DIR@/tpls/fmt/include"
 	else
 		error_exit "Invalid CUDA Quantum install configuration."
 	fi
@@ -171,7 +213,7 @@ if [ -d "${llvm_install_dir}/bin" -a \
 fi
 
 # Compiler and linker flags
-COMPILER_FLAGS="-std=c++20 -I${CUDAQ_INCLUDE_PATH} ${CUDAQ_CLANG_EXTRA_ARGS}"
+COMPILER_FLAGS="-I${CUDAQ_INCLUDE_PATH} ${CUDAQ_CLANG_EXTRA_ARGS}"
 CLANG_RESOURCE_DIR=""
 # If we are a relocatable package, we want to
 # add compiler flags that will point clang to our repackaged
@@ -188,7 +230,7 @@ if [ -f "$NVQPP_LD_PATH" ]; then
 fi
 LINKER_FLAGS="${LINKER_FLAGS} -Wl,-rpath,${install_dir}/lib -Wl,-rpath,${install_dir}/lib/plugins -Wl,-rpath,${PWD}"
 
-LIBRARY_MODE_EXECUTION_MANAGER="qir"
+LIBRARY_MODE_EXECUTION_MANAGER="default"
 PLATFORM_LIBRARY="default"
 LLVM_QUANTUM_TARGET="qir"
 LINKDIRS="-L${install_dir}/lib -L${install_dir}/lib/plugins @CUDAQ_CXX_NVQPP_LINK_STR@"
@@ -196,21 +238,15 @@ LINKLIBS="-lcudaq -lcudaq-common -lcudaq-mlir-runtime -lcudaq-builder -lcudaq-en
 
 # Add any plugin libraries to the link stage
 CUDAQ_PLUGIN_DIR=${install_dir}/lib/plugins
-if [ -d "$CUDAQ_PLUGIN_DIR" ] && [ -n "$(ls -A $CUDAQ_PLUGIN_DIR)" ]
-then 
-  CUDAQ_PLUGIN_LIBS=`ls ${install_dir}/lib/plugins/*` 
-  for entry in $CUDAQ_PLUGIN_LIBS
-  do 
+if [ -d "$CUDAQ_PLUGIN_DIR" ] && [ -n "$(ls -A $CUDAQ_PLUGIN_DIR)" ]; then
+  CUDAQ_PLUGIN_LIBS=`ls ${install_dir}/lib/plugins/*`
+  for entry in $CUDAQ_PLUGIN_LIBS; do
     PLUGIN_NAME=$(basename $entry)
     PLUGIN_NAME=${PLUGIN_NAME#lib}
     PLUGIN_NAME=${PLUGIN_NAME%@CMAKE_SHARED_LIBRARY_SUFFIX@}
     LINKLIBS="$LINKLIBS -l$PLUGIN_NAME"
-  done 
+  done
 fi
-
-# Provide a default backend, user can override
-NVQIR_SIMULATION_BACKEND="qpp"
-NVQIR_LIBS="-lnvqir -lnvqir-"
 
 CUDAQ_EMULATE_REMOTE=false
 CLANG_VERBOSE=
@@ -219,7 +255,10 @@ OUTPUTFILE=
 OBJS=
 SRCS=
 ARGS=
+CUDAQ_QUAKE_ARGS=
 DO_LINK=true
+SHOW_VERSION=false
+ENABLE_UNWIND_LOWERING=true
 ENABLE_DEVICE_CODE_LOADERS=true
 ENABLE_KERNEL_EXECUTION=true
 ENABLE_AGGRESSIVE_EARLY_INLINE=true
@@ -232,23 +271,68 @@ EMIT_QIR=false
 PREPROCESSOR_DEFINES=
 CUDAQ_QUAKE_DEBUG=
 SHOW_HELP=false
-LIST_TARGETS=false 
+LIST_TARGETS=false
+DISABLE_QUBIT_MAPPING=false
+NVQIR_LIBS="-lnvqir -lnvqir-"
+CPPSTD=-std=c++20
+CUDAQ_OPT_PLUGIN_ARGS=
+CUDAQ_OPT_EXTRA_PASSES=
 
-# We default to LIBRARY_MODE, physical 
-# Quantum Targets can override this to turn on 
+# Provide a default backend, user can override
+NVQIR_SIMULATION_BACKEND="qpp"
+# Check availability of NVIDA GPU(s)
+gpu_found=$(query_gpu)
+if ${gpu_found} && [ -f "${install_dir}/lib/libnvqir-custatevec-fp32.so" ]; then
+	NVQIR_SIMULATION_BACKEND="custatevec-fp32"
+fi
+# Check environment variable - overrides the default
+if [[ ! -z "${CUDAQ_DEFAULT_SIMULATOR}" ]]; then
+	available_simulators=( $(list_simulators) )
+	for s in "${available_simulators[@]}"
+	do
+		if [ "${CUDAQ_DEFAULT_SIMULATOR}" = "$s" ]; then
+			TARGET_CONFIG="${CUDAQ_DEFAULT_SIMULATOR}"
+			NVQIR_SIMULATION_BACKEND=$(get_simulation_backend "$s")
+			break
+		fi
+	done
+fi
+
+# We default to LIBRARY_MODE, physical
+# Quantum Targets can override this to turn on
 # our MLIR compilation workflow.
 LIBRARY_MODE=true
 
 CXX=${LLVMBIN}clang++${llvm_suffix}
 LINKER_CXX=${CXX}
 CMAKE_FALLBACK_HOST_CXX=${CXX}
-COPY_INPUT_ARGS=$@
+TARGET_ARGS=
 
 if [[ $# -eq 0 ]]; then
     SHOW_HELP=true
 fi
 
+# First, find the target option. The name is needed since it is the prefix for
+# any target specific options.
+N=$#
+for (( i=1; i<=$N; i++ )); do
+	if [[ ${@:$i:1} == --target ]] || [[ ${@:$i:1} == -target ]]; then
+		TARGET_CONFIG="${@:$i+1:1}"
+		break
+	fi
+done
+
 while [ $# -ne 0 ]; do
+	# Filter out any target-specific options.
+	if [[ $# -gt 1 ]] && [[ -n "${TARGET_CONFIG}" ]] && \
+	     [[ "$1" = --${TARGET_CONFIG}-* ]]; then
+		# Assume always has an additional value
+		TARGET_ARGS="${TARGET_ARGS} $1 $2"
+		shift 2
+		continue
+	fi
+
+	# Otherwise, process the argument.
 	case "$1" in
 	--llvm-version)
 		llvm_suffix="$2"
@@ -259,14 +343,20 @@ while [ $# -ne 0 ]; do
 		shift
 		;;
 	--target | -target)
-		TARGET_CONFIG="$2"
 		shift
 		;;
 	--emit-qir | -emit-qir)
 		EMIT_QIR=true
+		# NOTE: QIR is not emitted in library mode, so automatically apply '--enable-mlir'
+		LIBRARY_MODE=false
 		;;
 	--emulate | -emulate)
 		CUDAQ_EMULATE_REMOTE=true
+		;;
+	# This is intentionally not included in the "show_help" documentation
+	# because it may change in the future.
+	--disable-qubit-mapping | -disable-qubit-mapping)
+		DISABLE_QUBIT_MAPPING=true
 		;;
 	--list-targets)
 		LIST_TARGETS=true
@@ -277,7 +367,7 @@ while [ $# -ne 0 ]; do
 		;;
 	--load | -load)
 		LINKLIBS="${LINKLIBS} -lcudaq-$2"
-		shift 
+		shift
 		;;
 	--cmake-host-compiler)
 		CMAKE_FALLBACK_HOST_CXX="$2"
@@ -299,6 +389,12 @@ while [ $# -ne 0 ]; do
 	--device-code-loading)
 		ENABLE_DEVICE_CODE_LOADERS=true
 		;;
+	--no-unwind-lowering)
+		ENABLE_UNWIND_LOWERING=false
+		;;
+	--unwind-lowering)
+		ENABLE_UNWIND_LOWERING=true
+		;;
 	--no-kernel-execution)
 		ENABLE_KERNEL_EXECUTION=false
 		;;
@@ -311,10 +407,10 @@ while [ $# -ne 0 ]; do
 	--aggressive-early-inline)
 		ENABLE_AGGRESSIVE_EARLY_INLINE=true
 		;;
-	--no-quake-apply-specialization)
+	--no-apply-specialization)
 		ENABLE_APPLY_SPECIALIZATION=false
 		;;
-	--quake-apply-specialization)
+	--apply-specialization)
 		ENABLE_APPLY_SPECIALIZATION=true
 		;;
 	--no-lambda-lifting)
@@ -322,6 +418,14 @@ while [ $# -ne 0 ]; do
 		;;
 	--lambda-lifting)
 		ENABLE_LAMBDA_LIFTING=true
+		;;
+	--opt-plugin)
+		CUDAQ_OPT_PLUGIN_ARGS="${CUDAQ_OPT_PLUGIN_ARGS} --load-cudaq-plugin $2"
+		shift
+		;;
+	--opt-pass)
+		CUDAQ_OPT_EXTRA_PASSES=$(add_pass_to_pipeline "${CUDAQ_OPT_EXTRA_PASSES}" "$2") 
+		shift
 		;;
 	--save-temps)
 		DELETE_TEMPS=false
@@ -335,7 +439,7 @@ while [ $# -ne 0 ]; do
 		shift
 		;;
 	-D*)
-		DEFINED_VAR=$1 
+		DEFINED_VAR=$1
 		PREPROCESSOR_DEFINES="${PREPROCESSOR_DEFINES} -D ${DEFINED_VAR:2}"
 		;;
 	-L)
@@ -350,10 +454,16 @@ while [ $# -ne 0 ]; do
 		LINKLIBS="${LINKLIBS} -l$2"
 		shift
 		;;
+	-fPIC|-fpic)
+		# Pass to linker, library mode, and cudaq-quake
+		LINKER_FLAGS="${LINKER_FLAGS} $1"
+		ARGS="${ARGS} $1"
+		CUDAQ_QUAKE_ARGS="${CUDAQ_QUAKE_ARGS} --Xcudaq $1"
+		;;
 	-c)
 		DO_LINK=false
 		;;
-	-L* | -Wl*)
+	-L* | -Wl* |-shared|-static)
 		LINKER_FLAGS="${LINKER_FLAGS} $1"
 		;;
 	-I*)
@@ -364,19 +474,30 @@ while [ $# -ne 0 ]; do
 	-l*)
 		LINKLIBS="${LINKLIBS} $1"
 		;;
+	--version)
+		CUDAQ_QUAKE_ARGS="--nvqpp-version ${CUDAQ_QUAKE_ARGS}"
+		SHOW_VERSION=true
+		;;
 	-v)
 		ECHO=true
 		;;
-	*.o)
+	-std=*)
+		CPPSTD="$1"
+		CUDAQ_QUAKE_ARGS="${CUDAQ_QUAKE_ARGS} $1"
+		;;
+	*.o | *.so | *.bundle)
 		OBJS="${OBJS} $1"
 		;;
 	*.cpp | *.cc)
 		SRCS="${SRCS} $1"
 		;;
+	*.a | *.dylib)
+		LINKLIBS="${LINKLIBS} $1"
+		;;
 	*)
-		#FIXME: issue #258
-		#echo "argument $1 is ignored" >&2
+		# Pass any unrecognized options on to the clang++ tool.
 		ARGS="${ARGS} $1"
+		CUDAQ_QUAKE_ARGS="${CUDAQ_QUAKE_ARGS} --Xcudaq $1"
 		;;
 	esac
 	shift
@@ -400,6 +521,8 @@ function delete_temp_files {
 }
 trap delete_temp_files EXIT
 
+COMPILER_FLAGS="${CPPSTD} ${COMPILER_FLAGS}"
+
 # Goal here is to parse the backend config file, get the
 # platform library name, and any boolean flags, and setup
 # the resultant binary to target that specified backend.
@@ -408,14 +531,16 @@ if [ -n "${TARGET_CONFIG}" ]; then
 	TARGET_CONFIG_FILE="${install_dir}/targets/${TARGET_CONFIG}.config"
 	if [ -f "${TARGET_CONFIG_FILE}" ]; then
 		GEN_TARGET_BACKEND=false
-		. "${TARGET_CONFIG_FILE}" ${COPY_INPUT_ARGS}
+		. "${TARGET_CONFIG_FILE}" ${TARGET_ARGS}
 
 		if ${GEN_TARGET_BACKEND}; then
-			# Add a function that will run before main
-			# and set the target backend on the quantum_platform
-			TARGET_CONFIG="${TARGET_CONFIG};emulate;${CUDAQ_EMULATE_REMOTE}${PLATFORM_EXTRA_ARGS}"
+			# Add a function that will run before main and set the target
+			# backend on the quantum_platform
+			TARGET_CONFIG="${TARGET_CONFIG};emulate;${CUDAQ_EMULATE_REMOTE}"
+			TARGET_CONFIG="${TARGET_CONFIG};disable_qubit_mapping;${DISABLE_QUBIT_MAPPING}"
+			TARGET_CONFIG="${TARGET_CONFIG}${PLATFORM_EXTRA_ARGS}"
 			OUTFILENAME=$(mktemp nvqppGenTargetBackend.XXXXXX.o)
-			run ${CXX} -DNVQPP_TARGET_BACKEND_CONFIG="\"${TARGET_CONFIG}\"" -o $OUTFILENAME -c -x c++ ${install_dir}/targets/backendConfig.cpp
+			run ${CXX} ${CPPSTD} -DNVQPP_TARGET_BACKEND_CONFIG="\"${TARGET_CONFIG}\"" -o $OUTFILENAME -c -x c++ ${install_dir}/targets/backendConfig.cpp
 			OBJS_TO_MERGE="${OUTFILENAME}"
 			TMPFILES="${TMPFILES} ${OUTFILENAME}"
 		fi
@@ -445,6 +570,10 @@ fi
 
 RUN_OPT=false
 OPT_PASSES=
+if ${ENABLE_UNWIND_LOWERING}; then
+	RUN_OPT=true
+	OPT_PASSES="func.func(unwind-lowering)"
+fi
 if ${ENABLE_LAMBDA_LIFTING}; then
 	RUN_OPT=true
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "canonicalize,lambda-lifting")
@@ -472,13 +601,24 @@ if ${ENABLE_DEVICE_CODE_LOADERS}; then
 fi
 if ${ENABLE_LOWER_TO_CFG}; then
 	RUN_OPT=true
-	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "func.func(unwind-lowering),expand-measurements,func.func(lower-to-cfg)")
+	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "expand-measurements,func.func(lower-to-cfg)")
 fi
 if ${RUN_OPT}; then
 	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "canonicalize,cse")
 fi
 
+if [ ! -z "$CUDAQ_OPT_EXTRA_PASSES" ]; then
+	OPT_PASSES=$(add_pass_to_pipeline "${OPT_PASSES}" "$CUDAQ_OPT_EXTRA_PASSES")
+fi
+
 OPT_PASSES="builtin.module(${OPT_PASSES})"
+
+if ${SHOW_VERSION} && [ -z "$SRCS" ] && [ -z "$OBJS" ]; then
+	# If version is requested and no source files were provided, bypass the
+	# cudaq-quake path that expects to read code from stdin.
+	echo "" | ${TOOLBIN}cudaq-quake ${CUDAQ_QUAKE_ARGS}
+	DO_LINK=false
+fi
 
 for i in ${SRCS}; do
 	file=$(basename -s .cc -s .cpp $i)
@@ -486,7 +626,7 @@ for i in ${SRCS}; do
 	# If LIBRARY_MODE explicitly requested, then
 	# simply compile with the classical compiler.
 	if ${LIBRARY_MODE}; then
-		run ${CMAKE_FALLBACK_HOST_CXX} ${COMPILER_FLAGS} -DCUDAQ_LIBRARY_MODE ${PREPROCESSOR_DEFINES} ${INCLUDES} -o ${file}.o -c $i
+		run ${CMAKE_FALLBACK_HOST_CXX} ${COMPILER_FLAGS} -DCUDAQ_LIBRARY_MODE ${PREPROCESSOR_DEFINES} ${INCLUDES} ${ARGS} -o ${file}.o -c $i
 		OBJS="${OBJS} ${file}.o"
 		# Go to the next iteration, maybe there
 		# will be cudaq kernels there
@@ -495,7 +635,7 @@ for i in ${SRCS}; do
 
 	# If we make it here, we have CUDA Quantum kernels, need
 	# to map to MLIR and output an LLVM file for the classical code
-	run ${TOOLBIN}cudaq-quake ${CUDAQ_QUAKE_DEBUG} ${CLANG_VERBOSE} ${CLANG_RESOURCE_DIR} ${PREPROCESSOR_DEFINES} ${INCLUDES} --emit-llvm-file $i -o ${file}.qke
+	run ${TOOLBIN}cudaq-quake ${CUDAQ_QUAKE_DEBUG} ${CLANG_VERBOSE} ${CLANG_RESOURCE_DIR} ${PREPROCESSOR_DEFINES} ${INCLUDES} ${CUDAQ_QUAKE_ARGS} --emit-llvm-file $i -o ${file}.qke
 	TMPFILES="${TMPFILES} ${file}.ll ${file}.qke"
 
 	# Run the MLIR passes
@@ -504,7 +644,7 @@ for i in ${SRCS}; do
 		if ${RUN_OPT}; then
 			DCL_FILE=$(mktemp ${file}.qke.XXXXXX)
 			TMPFILES="${TMPFILES} ${DCL_FILE} ${DCL_FILE}.o"
-			run ${TOOLBIN}cudaq-opt --pass-pipeline="${OPT_PASSES}" ${QUAKE_IN} -o ${DCL_FILE}
+			run ${TOOLBIN}cudaq-opt ${CUDAQ_OPT_PLUGIN_ARGS} --pass-pipeline="${OPT_PASSES}" ${QUAKE_IN} -o ${DCL_FILE}
 			QUAKE_IN=${DCL_FILE}
 		fi
 		QUAKELL_FILE=$(mktemp ${file}.ll.XXXXXX)
@@ -545,7 +685,7 @@ if ${DO_LINK}; then
 	run ${LINKER_CXX} ${LINKER_PATH} ${LINKER_FLAGS} ${LINKDIRS} ${OBJS} ${LINKLIBS} ${OUTPUTOPTS}
 else
 	# Save the object file to what the user specified
-	if [ ! -z "${OUTPUTFILE}" ] && [ $((${#OBJS[@]} == 0)) ]; then
+	if [ ! -z "${OUTPUTFILE}" ] && ((${#OBJS[@]} == 0)); then
 		run mv ${OBJS} ${OUTPUTFILE}
 	fi
 fi

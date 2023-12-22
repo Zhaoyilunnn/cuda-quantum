@@ -13,7 +13,7 @@
 #include <gtest/gtest.h>
 #include <regex>
 
-std::string mockPort = "62454";
+std::string mockPort = "62440";
 std::string backendStringTemplate =
     "quantinuum;emulate;false;url;http://localhost:{};credentials;{}";
 
@@ -161,8 +161,8 @@ CUDAQ_TEST(QuantinuumTester, checkObserveSync) {
   auto result = cudaq::observe(10000, kernel, h, .59);
   result.dump();
 
-  printf("ENERGY: %lf\n", result.exp_val_z());
-  EXPECT_TRUE(isValidExpVal(result.exp_val_z()));
+  printf("ENERGY: %lf\n", result.expectation());
+  EXPECT_TRUE(isValidExpVal(result.expectation()));
 }
 
 CUDAQ_TEST(QuantinuumTester, checkObserveSyncEmulate) {
@@ -188,8 +188,8 @@ CUDAQ_TEST(QuantinuumTester, checkObserveSyncEmulate) {
   auto result = cudaq::observe(100000, kernel, h, .59);
   result.dump();
 
-  printf("ENERGY: %lf\n", result.exp_val_z());
-  EXPECT_TRUE(isValidExpVal(result.exp_val_z()));
+  printf("ENERGY: %lf\n", result.expectation());
+  EXPECT_TRUE(isValidExpVal(result.expectation()));
 }
 
 CUDAQ_TEST(QuantinuumTester, checkObserveAsync) {
@@ -215,8 +215,8 @@ CUDAQ_TEST(QuantinuumTester, checkObserveAsync) {
   auto result = future.get();
   result.dump();
 
-  printf("ENERGY: %lf\n", result.exp_val_z());
-  EXPECT_TRUE(isValidExpVal(result.exp_val_z()));
+  printf("ENERGY: %lf\n", result.expectation());
+  EXPECT_TRUE(isValidExpVal(result.expectation()));
 }
 
 CUDAQ_TEST(QuantinuumTester, checkObserveAsyncEmulate) {
@@ -244,8 +244,8 @@ CUDAQ_TEST(QuantinuumTester, checkObserveAsyncEmulate) {
   auto result = future.get();
   result.dump();
 
-  printf("ENERGY: %lf\n", result.exp_val_z());
-  EXPECT_TRUE(isValidExpVal(result.exp_val_z()));
+  printf("ENERGY: %lf\n", result.expectation());
+  EXPECT_TRUE(isValidExpVal(result.expectation()));
 }
 
 CUDAQ_TEST(QuantinuumTester, checkObserveAsyncLoadFromFile) {
@@ -285,8 +285,133 @@ CUDAQ_TEST(QuantinuumTester, checkObserveAsyncLoadFromFile) {
   std::remove("saveMeObserve.json");
   result.dump();
 
-  printf("ENERGY: %lf\n", result.exp_val_z());
-  EXPECT_TRUE(isValidExpVal(result.exp_val_z()));
+  printf("ENERGY: %lf\n", result.expectation());
+  EXPECT_TRUE(isValidExpVal(result.expectation()));
+}
+
+CUDAQ_TEST(QuantinuumTester, checkControlledRotations) {
+  // Checks for more advanced controlled rotations that only
+  // work in emulation.
+  std::string home = std::getenv("HOME");
+  std::string fileName = home + "/FakeCppQuantinuum.config";
+  auto backendString =
+      fmt::format(fmt::runtime(backendStringTemplate), mockPort, fileName);
+
+  auto &platform = cudaq::get_platform();
+  platform.setTargetBackend(backendString);
+
+  // rx: pi
+  {
+    auto kernel = cudaq::make_kernel();
+    auto controls1 = kernel.qalloc(2);
+    auto controls2 = kernel.qalloc(2);
+    auto control3 = kernel.qalloc();
+    auto target = kernel.qalloc();
+
+    // All of our controls in the 1-state.
+    kernel.x(controls1);
+    kernel.x(controls2);
+    kernel.x(control3);
+
+    kernel.rx<cudaq::ctrl>(M_PI, controls1, controls2, control3, target);
+
+    std::cout << kernel.to_quake() << "\n";
+
+    auto counts = cudaq::sample(kernel);
+    counts.dump();
+
+    // Target qubit should've been rotated to |1>.
+    EXPECT_EQ(counts.count("0000111111"), 1000);
+  }
+
+  // rx: 0.0
+  {
+    auto kernel = cudaq::make_kernel();
+    auto controls1 = kernel.qalloc(2);
+    auto controls2 = kernel.qalloc(2);
+    auto control3 = kernel.qalloc();
+    auto target = kernel.qalloc();
+
+    // All of our controls in the 1-state.
+    kernel.x(controls1);
+    kernel.x(controls2);
+    kernel.x(control3);
+
+    kernel.rx<cudaq::ctrl>(0.0, controls1, controls2, control3, target);
+
+    auto counts = cudaq::sample(kernel);
+    counts.dump();
+
+    // Target qubit should've stayed in |0>
+    EXPECT_EQ(counts.count("0000111110"), 1000);
+  }
+
+  // ry: pi
+  {
+    auto kernel = cudaq::make_kernel();
+    auto controls1 = kernel.qalloc(2);
+    auto controls2 = kernel.qalloc(2);
+    auto control3 = kernel.qalloc();
+    auto target = kernel.qalloc();
+
+    // All of our controls in the 1-state.
+    kernel.x(controls1);
+    kernel.x(controls2);
+    kernel.x(control3);
+
+    kernel.ry<cudaq::ctrl>(M_PI, controls1, controls2, control3, target);
+
+    auto counts = cudaq::sample(kernel);
+    counts.dump();
+
+    // Target qubit should've been rotated to |1>
+    EXPECT_EQ(counts.count("0000111111"), 1000);
+  }
+
+  // ry: pi / 2
+  {
+    cudaq::set_random_seed(4);
+
+    auto kernel = cudaq::make_kernel();
+    auto controls1 = kernel.qalloc(2);
+    auto controls2 = kernel.qalloc(2);
+    auto control3 = kernel.qalloc();
+    auto target = kernel.qalloc();
+
+    // All of our controls in the 1-state.
+    kernel.x(controls1);
+    kernel.x(controls2);
+    kernel.x(control3);
+
+    kernel.ry<cudaq::ctrl>(M_PI_2, controls1, controls2, control3, target);
+
+    auto counts = cudaq::sample(kernel);
+    counts.dump();
+
+    // Target qubit should have a 50/50 mix between |0> and |1>
+    EXPECT_TRUE(counts.count("0000111111") < 550);
+    EXPECT_TRUE(counts.count("0000111110") > 450);
+  }
+
+  {
+    auto kernel = cudaq::make_kernel();
+    auto controls1 = kernel.qalloc(3);
+    auto controls2 = kernel.qalloc(3);
+    auto control3 = kernel.qalloc();
+    auto target = kernel.qalloc();
+
+    kernel.x(controls1);
+    kernel.x(control3);
+    // Should do nothing.
+    kernel.x<cudaq::ctrl>(controls1, controls2, control3, target);
+    kernel.x(controls2);
+    // Should rotate `target`.
+    kernel.rx<cudaq::ctrl>(M_PI, controls1, controls2, control3, target);
+
+    auto counts = cudaq::sample(kernel);
+    counts.dump();
+    EXPECT_EQ(counts.count("00000011111111"), 1000);
+  }
 }
 
 int main(int argc, char **argv) {

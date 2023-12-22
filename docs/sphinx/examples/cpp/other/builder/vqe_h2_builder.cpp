@@ -109,14 +109,16 @@ int main() {
   }
 
   // Run the VQE algorithm from specific initial parameters.
-  auto init_params = cudaq::random_vector(-1, 1, n_params);
+  auto init_params =
+      cudaq::random_vector(-1, 1, n_params, std::mt19937::default_seed);
 
   // Run VQE
   cudaq::optimizers::lbfgs optimizer;
   cudaq::gradients::central_difference gradient(kernel);
   optimizer.initial_parameters = init_params;
   optimizer.max_eval = 20;
+  optimizer.max_line_search_trials = 10;
   auto [opt_val, opt_params] =
       cudaq::vqe(kernel, gradient, H, optimizer, n_params);
-  printf("Optimal value = %lf\n", opt_val);
+  printf("Optimal value = %.16lf\n", opt_val);
 }

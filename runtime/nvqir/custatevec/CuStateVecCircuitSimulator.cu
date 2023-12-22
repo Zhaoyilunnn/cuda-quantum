@@ -4,7 +4,7 @@
  *                                                                             *
  * This source code and the accompanying materials are made available under    *
  * the terms of the Apache License 2.0 which accompanies this distribution.    *
- *******************************************************************************/
+ ******************************************************************************/
 
 #pragma nv_diag_suppress = unsigned_compare_with_zero
 #pragma nv_diag_suppress = unrecognized_gcc_pragma
@@ -113,9 +113,6 @@ protected:
   /// @brief The size of the extra workspace
   size_t extraWorkspaceSizeInBytes = 0;
 
-  /// @brief Count the number of resets.
-  int nResets = 0;
-
   custatevecComputeType_t cuStateVecComputeType = CUSTATEVEC_COMPUTE_64F;
   cudaDataType_t cuStateVecCudaDataType = CUDA_C_64F;
   std::random_device randomDevice;
@@ -163,10 +160,8 @@ protected:
     if (extraWorkspaceSizeInBytes > 0)
       HANDLE_CUDA_ERROR(cudaMalloc(&extraWorkspace, extraWorkspaceSizeInBytes));
 
-    // When we perform a deallocation we apply a
-    // qubit reset, and the state does not shrink (trying to minimize device
-    // memory manipulations), but nQubitsAllocated decrements.
-    auto localNQubitsAllocated = nQubitsAllocated + nResets;
+    auto localNQubitsAllocated =
+        stateDimension > 0 ? std::log2(stateDimension) : 0;
 
     // apply gate
     HANDLE_ERROR(custatevecApplyMatrix(
@@ -200,7 +195,7 @@ protected:
       return;
 
     int dev;
-    cudaGetDevice(&dev);
+    HANDLE_CUDA_ERROR(cudaGetDevice(&dev));
     cudaq::info("GPU {} Allocating new qubit array of size {}.", dev, count);
 
     if (!deviceStateVector) {
@@ -266,7 +261,6 @@ protected:
       HANDLE_CUDA_ERROR(cudaFree(extraWorkspace));
     deviceStateVector = nullptr;
     extraWorkspaceSizeInBytes = 0;
-    nResets = 0;
   }
 
   /// @brief Apply the given GateApplicationTask
@@ -350,7 +344,6 @@ public:
   /// @param qubitIdx
   void resetQubit(const std::size_t qubitIdx) override {
     flushGateQueue();
-    nResets++;
     const int basisBits[] = {(int)qubitIdx};
     int parity;
     double rand = randomValues(1, 1.0)[0];
@@ -361,6 +354,37 @@ public:
     if (parity) {
       x(qubitIdx);
     }
+  }
+
+  /// @brief Override base class functionality for a general Pauli
+  /// rotation to delegate to the performant custatevecApplyPauliRotation.
+  void applyExpPauli(double theta, const std::vector<std::size_t> &controlIds,
+                     const std::vector<std::size_t> &qubits,
+                     const cudaq::spin_op &op) override {
+    flushGateQueue();
+    cudaq::info(" [cusv decomposing] exp_pauli({}, {})", theta,
+                op.to_string(false));
+    std::vector<int> controls, targets;
+    for (const auto &bit : controlIds)
+      controls.emplace_back(static_cast<int>(bit));
+    std::vector<custatevecPauli_t> paulis;
+    op.for_each_pauli([&](cudaq::pauli p, std::size_t i) {
+      if (p == cudaq::pauli::I)
+        paulis.push_back(custatevecPauli_t::CUSTATEVEC_PAULI_I);
+      else if (p == cudaq::pauli::X)
+        paulis.push_back(custatevecPauli_t::CUSTATEVEC_PAULI_X);
+      else if (p == cudaq::pauli::Y)
+        paulis.push_back(custatevecPauli_t::CUSTATEVEC_PAULI_Y);
+      else
+        paulis.push_back(custatevecPauli_t::CUSTATEVEC_PAULI_Z);
+
+      targets.push_back(qubits[i]);
+    });
+
+    HANDLE_ERROR(custatevecApplyPauliRotation(
+        handle, deviceStateVector, cuStateVecCudaDataType, nQubitsAllocated,
+        theta, paulis.data(), targets.data(), targets.size(), controls.data(),
+        nullptr, controls.size()));
   }
 
   /// @brief Compute the operator expectation value, with respect to

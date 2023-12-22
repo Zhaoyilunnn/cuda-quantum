@@ -102,7 +102,7 @@ async def postJob(job: Job,
     kernel = ctypes.CFUNCTYPE(None)(funcPtr)
 
     # Invoke the Kernel
-    cudaq.testing.toggleBaseProfile()
+    cudaq.testing.toggleDynamicQubitManagement()
     qubits, context = cudaq.testing.initialize(numQubitsRequired, job.count)
     kernel()
     results = cudaq.testing.finalize(qubits, context)
@@ -141,4 +141,4 @@ def startServer(port):
 
 
 if __name__ == '__main__':
-    startServer(62454)
+    startServer(62440)

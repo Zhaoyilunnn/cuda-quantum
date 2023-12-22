@@ -46,11 +46,11 @@ def objective_function(parameter_vector: List[float],
     # We define the call to `cudaq.observe` here as a lambda to
     # allow it to be passed into the gradient strategy as a
     # function. If you were using a gradient-free optimizer,
-    # you could purely define `cost = cudaq.observe().expectation_z()`.
+    # you could purely define `cost = cudaq.observe().expectation()`.
     get_result = lambda parameter_vector: cudaq.observe(
-        kernel, hamiltonian, parameter_vector, shots_count=100).expectation_z()
+        kernel, hamiltonian, parameter_vector, shots_count=100).expectation()
     # `cudaq.observe` returns a `cudaq.ObserveResult` that holds the
-    # counts dictionary and the `expectation_z`.
+    # counts dictionary and the `expectation`.
     cost = get_result(parameter_vector)
     print(f"<H> = {cost}")
     # Compute the gradient vector using `cudaq.gradients.STRATEGY.compute()`.
@@ -61,8 +61,9 @@ def objective_function(parameter_vector: List[float],
     return cost, gradient_vector
 
 
+cudaq.set_random_seed(13)  # make repeatable
 energy, parameter = optimizer.optimize(dimensions=1,
                                        function=objective_function)
 
-print(f"\nminimized <H> = {round(energy,3)}")
-print(f"optimal theta = {round(parameter[0],3)}")
+print(f"\nminimized <H> = {round(energy,16)}")
+print(f"optimal theta = {round(parameter[0],16)}")

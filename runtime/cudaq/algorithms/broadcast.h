@@ -9,19 +9,22 @@
 #pragma once
 
 #include "cudaq/platform.h"
+#include "host_config.h"
 
 namespace cudaq {
 
-/// @brief An ArgumentSet is a tuple of vectors of general
-/// arguments to a CUDA Quantum kernel. The ith vector of the tuple
-/// corresponds to the ith argument of the kernel. The jth element of
-/// the ith vector corresponds to the jth batch of arguments to evaluate
-/// the kernel at.
+void set_random_seed(std::size_t);
+std::size_t get_random_seed();
+
+/// @brief An ArgumentSet is a tuple of vectors of general arguments to a CUDA
+/// Quantum kernel. The `i-th` vector of the tuple corresponds to the `i-th`
+/// argument of the kernel. The `j-th` element of the `i-th` vector corresponds
+/// to the `j-th` batch of arguments to evaluate the kernel at.
 template <typename... Args>
 using ArgumentSet = std::tuple<std::vector<Args>...>;
 
-/// @brief Create a new ArgumentSet from a variadic list of
-/// vectors of general args.
+/// @brief Create a new ArgumentSet from a variadic list of vectors of general
+/// arguments.
 template <typename... Args>
 auto make_argset(const std::vector<Args> &...args) {
   return std::make_tuple(args...);
@@ -32,9 +35,9 @@ template <typename ReturnType, typename... Args>
 using BroadcastFunctorType = const std::function<ReturnType(
     std::size_t, std::size_t, std::size_t, Args &...)>;
 
-/// @brief Given the input BroadcastFunctorType, apply it to all
-/// argument sets in the provided ArgumentSet `params`. Distribute the
-/// work over the provided number of QPUs.
+/// @brief Given the input BroadcastFunctorType, apply it to all argument sets
+/// in the provided ArgumentSet `params`. Distribute the work over the provided
+/// number of QPUs.
 template <typename ResType, typename... Args>
 std::vector<ResType>
 broadcastFunctionOverArguments(std::size_t numQpus, quantum_platform &platform,
@@ -53,12 +56,15 @@ broadcastFunctionOverArguments(std::size_t numQpus, quantum_platform &platform,
                                "over - vector sizes not the same.");
   });
 
+  // Fetch the thread-specific seed outside the functor and then pass it inside.
+  std::size_t seed = cudaq::get_random_seed();
+
   FutureCollection futures;
   for (std::size_t qpuId = 0; qpuId < numQpus; qpuId++) {
     std::promise<std::vector<ResType>> _promise;
     futures.emplace_back(_promise.get_future());
     std::function<void()> functor = detail::make_copyable_function(
-        [&params, &apply, qpuId, nExecsPerQpu,
+        [&params, &apply, qpuId, nExecsPerQpu, seed,
          promise = std::move(_promise)]() mutable {
           // Compute the lower and upper bounds of the
           // argument set that should be computed on the current QPU
@@ -85,11 +91,25 @@ broadcastFunctionOverArguments(std::size_t numQpus, quantum_platform &platform,
             std::get<2>(currentArgs) = nExecsPerQpu;
             counter++;
 
+            // If seed is 0, then it has not been set.
+            if (seed > 0)
+              cudaq::set_random_seed(seed);
+
             // Fill the argument tuple with the actual arguments.
             cudaq::tuple_for_each_with_idx(
-                params, [&]<typename IDX_TYPE>(auto &&element, IDX_TYPE &&idx) {
+                params,
+#if CUDAQ_USE_STD20
+                [&]<typename IDX_TYPE>(auto &&element, IDX_TYPE &&idx) {
                   std::get<IDX_TYPE::value + 3>(currentArgs) = element[i];
-                });
+                }
+#else
+                [&](auto &&element, auto &&idx) {
+                  std::get<std::remove_cv_t<
+                               std::remove_reference_t<decltype(idx)>>::value +
+                           3>(currentArgs) = element[i];
+                }
+#endif
+            );
 
             // Call observe/sample with the current set of arguments
             // (provided as a tuple)

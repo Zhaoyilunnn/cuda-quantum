@@ -48,7 +48,7 @@ struct DeallocationAnalysisInfo {
             if (!deallocMap.count(&op))
               deallocMap.insert(std::make_pair(&op, false));
           } else if (auto dealloc = dyn_cast<quake::DeallocOp>(op)) {
-            auto val = dealloc.getQregOrVec();
+            auto val = dealloc.getReference();
             Operation *alloc = cast<quake::AllocaOp>(val.getDefiningOp());
             if (deallocMap.count(alloc))
               deallocMap[alloc] = true;
@@ -87,7 +87,7 @@ private:
     func->walk([this](Operation *o) {
       if (isa<cudaq::cc::UnwindBreakOp, cudaq::cc::UnwindContinueOp,
               cudaq::cc::UnwindReturnOp>(o)) {
-        o->emitError("must run unwind-lowering before quake-add-deallocs.");
+        o->emitError("must run unwind-lowering before add-dealloc.");
         hasErrors = true;
       } else if (auto alloc = dyn_cast<quake::AllocaOp>(o)) {
         auto *op = alloc.getOperation();
@@ -98,7 +98,7 @@ private:
                                   << op->getParentOp() << '\n');
         }
       } else if (auto dealloc = dyn_cast<quake::DeallocOp>(o)) {
-        auto val = dealloc.getQregOrVec();
+        auto val = dealloc.getReference();
         if (auto alloc = val.getDefiningOp<quake::AllocaOp>()) {
           auto *op = alloc.getOperation();
           if (allocMap.count(op))

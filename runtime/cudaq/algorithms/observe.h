@@ -8,17 +8,16 @@
 
 #pragma once
 
-#include "cudaq/spin_op.h"
-
-#include <functional>
-#include <ranges>
-#include <type_traits>
-#include <vector>
-
 #include "common/ExecutionContext.h"
 #include "common/ObserveResult.h"
 #include "cudaq/algorithms/broadcast.h"
 #include "cudaq/concepts.h"
+#include "cudaq/spin_op.h"
+#include "host_config.h"
+#include <functional>
+#include <ranges>
+#include <type_traits>
+#include <vector>
 
 namespace cudaq {
 
@@ -43,12 +42,25 @@ struct thread {};
 
 } // namespace parallel
 
+#if CUDAQ_USE_STD20
 /// @brief Define a combined sample function validation concept.
 /// These concepts provide much better error messages than old-school SFINAE
 template <typename QuantumKernel, typename... Args>
 concept ObserveCallValid =
     ValidArgumentsPassed<QuantumKernel, Args...> &&
     HasVoidReturnType<std::invoke_result_t<QuantumKernel, Args...>>;
+#endif
+
+/// Observe options to provide as an argument to the `observe()`,
+/// `async_observe()` functions.
+///
+/// \p shots is the number of shots to run for the given kernel. The default of
+/// -1 means direct calculations for simulation backends. \p noise is the noise
+/// model to use for the observe operation.
+struct observe_options {
+  int shots = -1;
+  cudaq::noise_model noise;
+};
 
 namespace details {
 
@@ -104,7 +116,7 @@ runObservation(KernelFunctor &&k, cudaq::spin_op &h, quantum_platform &platform,
       if (term.is_identity())
         sum += term.get_coefficient().real();
       else
-        sum += data.exp_val_z(term.to_string(false)) *
+        sum += data.expectation(term.to_string(false)) *
                term.get_coefficient().real();
     });
 
@@ -157,7 +169,7 @@ auto runObservationAsync(KernelFunctor &&wrappedKernel, spin_op &H,
 
 /// @brief Distribute the expectation value computations among the
 /// available platform QPUs. The `asyncLauncher` functor takes as input the
-/// qpu index and the `spin_op` chunk and returns an `async_observe_result`.
+/// QPU index and the `spin_op` chunk and returns an `async_observe_result`.
 inline auto distributeComputations(
     std::function<async_observe_result(std::size_t, spin_op &)> &&asyncLauncher,
     spin_op &H, std::size_t nQpus) {
@@ -167,7 +179,12 @@ inline auto distributeComputations(
 
   // Observe each sub-spin_op asynchronously
   std::vector<async_observe_result> asyncResults;
+#if CUDAQ_USE_STD20
   for (std::size_t i = 0; auto &op : spins) {
+#else
+  std::size_t i = 0;
+  for (auto &op : spins) {
+#endif
     asyncResults.emplace_back(asyncLauncher(i, op));
     i++;
   }
@@ -179,7 +196,7 @@ inline auto distributeComputations(
   for (auto &asyncResult : asyncResults) {
     auto res = asyncResult.get();
     auto incomingData = res.raw_data();
-    result += incomingData.exp_val_z();
+    result += incomingData.expectation();
     data += incomingData;
   }
 
@@ -189,16 +206,22 @@ inline auto distributeComputations(
 } // namespace details
 
 /// \brief Compute the expected value of `H` with respect to `kernel(Args...)`.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 observe_result observe(QuantumKernel &&kernel, spin_op H, Args &&...args) {
   // Run this SHOTS times
   auto &platform = cudaq::get_platform();
   auto shots = platform.get_shots().value_or(-1);
   auto kernelName = cudaq::getKernelName(kernel);
   return details::runObservation(
-             [&kernel, ... args = std::forward<Args>(args)]() mutable {
-               kernel(args...);
+             [&kernel, &args...]() mutable {
+               kernel(std::forward<Args>(args)...);
              },
              H, platform, shots, kernelName)
       .value();
@@ -207,9 +230,15 @@ observe_result observe(QuantumKernel &&kernel, spin_op H, Args &&...args) {
 /// @brief Compute the expected value of every `spin_op` provided in
 /// `SpinOpContainer` (a range concept) with respect to `kernel(Args...)`.
 /// Return a `std::vector<observe_result>`.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename SpinOpContainer, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...> &&
            std::ranges::range<SpinOpContainer>
+#else
+template <typename QuantumKernel, typename SpinOpContainer, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 std::vector<observe_result> observe(QuantumKernel &&kernel,
                                     const SpinOpContainer &termList,
                                     Args &&...args) {
@@ -227,8 +256,8 @@ std::vector<observe_result> observe(QuantumKernel &&kernel,
 
   // Run the observation
   auto result = details::runObservation(
-                    [&kernel, ... args = std::forward<Args>(args)]() mutable {
-                      kernel(args...);
+                    [&kernel, &args...]() mutable {
+                      kernel(std::forward<Args>(args)...);
                     },
                     op, platform, shots, kernelName)
                     .value();
@@ -236,19 +265,25 @@ std::vector<observe_result> observe(QuantumKernel &&kernel,
   // Convert back to a vector of results
   std::vector<observe_result> results;
   for (auto &o : termList)
-    results.emplace_back(result.exp_val_z(o), o, result.counts(o));
+    results.emplace_back(result.expectation(o), o, result.counts(o));
 
   return results;
 }
 
 /// @brief Compute the expected value of `H` with respect to `kernel(Args...)`.
-/// Distribute the work amongst available QPUs on the platform in parallel. This
-/// distribution can occur on multi-gpu multi-node platforms, multi-gpu
-/// single-node platforms, or multi-node no-gpu platforms. Programmers must
+/// Distribute the work `amongst` available QPUs on the platform in parallel.
+/// This distribution can occur on multi-GPU multi-node platforms, multi-GPU
+/// single-node platforms, or multi-node no-GPU platforms. Programmers must
 /// indicate the distribution type via the corresponding template types
 /// (cudaq::mgmn, cudaq::mgsn, cudaq::mn).
+#if CUDAQ_USE_STD20
 template <typename DistributionType, typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename DistributionType, typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 observe_result observe(std::size_t shots, QuantumKernel &&kernel, spin_op H,
                        Args &&...args) {
   // Run this SHOTS times
@@ -265,14 +300,29 @@ observe_result observe(std::size_t shots, QuantumKernel &&kernel, spin_op H,
       printf(
           "[cudaq::observe warning] distributed observe requested but only 1 "
           "QPU available. no speedup expected.\n");
-    // Let's distribute the work among the QPUs on this node
+#if CUDAQ_USE_STD20
+    // Let's distribute the work among the QPUs on this node.
     return details::distributeComputations(
-        [&kernel, ... args = std::forward<Args>(args)](std::size_t i,
-                                                       spin_op &op) mutable {
-          return observe_async(i, std::forward<QuantumKernel>(kernel), op,
-                               std::forward<Args>(args)...);
+        [&kernel, shots, ... args = std::forward<Args>(args)](
+            std::size_t i, spin_op &op) mutable {
+          return observe_async(shots, i, std::forward<QuantumKernel>(kernel),
+                               op, std::forward<Args>(args)...);
         },
         H, nQpus);
+#else
+    return details::distributeComputations(
+        [&kernel, shots,
+         args = std::forward_as_tuple(std::forward<Args>(args)...)](
+            std::size_t i, spin_op &op) mutable {
+          return std::apply(
+              [&](auto &&...args) {
+                observe_async(shots, i, std::forward<QuantumKernel>(kernel), op,
+                              std::forward<Args>(args)...);
+              },
+              std::move(args));
+        },
+        H, nQpus);
+#endif
   } else if (std::is_same_v<DistributionType, parallel::mpi>) {
 
     // This is an MPI distribution, where each node has N GPUs.
@@ -298,15 +348,28 @@ observe_result observe(std::size_t shots, QuantumKernel &&kernel, spin_op H,
 
     // Distribute locally, i.e. to the local nodes QPUs
     auto localRankResult = details::distributeComputations(
-        [&kernel, ... args = std::forward<Args>(args)](std::size_t i,
-                                                       spin_op &op) mutable {
-          return observe_async(i, std::forward<QuantumKernel>(kernel), op,
-                               std::forward<Args>(args)...);
+#if CUDAQ_USE_STD20
+        [&kernel, shots, ... args = std::forward<Args>(args)](
+            std::size_t i, spin_op &op) mutable {
+          return observe_async(shots, i, std::forward<QuantumKernel>(kernel),
+                               op, std::forward<Args>(args)...);
         },
+#else
+        [&kernel, shots,
+         args = std::forward_as_tuple(std::forward<Args>(args)...)](
+            std::size_t i, spin_op &op) mutable {
+          return std::apply(
+              [&](auto &&...args) {
+                observe_async(shots, i, std::forward<QuantumKernel>(kernel), op,
+                              std::forward<Args>(args)...);
+              },
+              std::move(args));
+        },
+#endif
         localH, nQpus);
 
     // combine all the data via an all_reduce
-    auto exp_val = localRankResult.exp_val_z();
+    auto exp_val = localRankResult.expectation();
     auto globalExpVal = mpi::all_reduce(exp_val, std::plus<double>());
     return observe_result(globalExpVal, H);
 
@@ -314,8 +377,14 @@ observe_result observe(std::size_t shots, QuantumKernel &&kernel, spin_op H,
     throw std::runtime_error("Invalid cudaq::par execution type.");
 }
 
+#if CUDAQ_USE_STD20
 template <typename DistributionType, typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename DistributionType, typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 observe_result observe(QuantumKernel &&kernel, spin_op H, Args &&...args) {
   auto &platform = cudaq::get_platform();
   auto shots = platform.get_shots().value_or(-1);
@@ -325,8 +394,14 @@ observe_result observe(QuantumKernel &&kernel, spin_op H, Args &&...args) {
 
 /// \brief Compute the expected value of `H` with respect to `kernel(Args...)`.
 /// Specify the number of shots.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 observe_result observe(std::size_t shots, QuantumKernel &&kernel, spin_op H,
                        Args &&...args) {
   // Run this SHOTS times
@@ -337,25 +412,73 @@ observe_result observe(std::size_t shots, QuantumKernel &&kernel, spin_op H,
   // If so, let's distribute the work among the QPUs
   if (auto nQpus = platform.num_qpus(); nQpus > 1)
     return details::distributeComputations(
-        [&kernel, ... args = std::forward<Args>(args)](std::size_t i,
-                                                       spin_op &op) mutable {
-          return observe_async(i, std::forward<QuantumKernel>(kernel), op,
-                               std::forward<Args>(args)...);
+#if CUDAQ_USE_STD20
+        [&kernel, shots, ... args = std::forward<Args>(args)](
+            std::size_t i, spin_op &op) mutable {
+          return observe_async(shots, i, std::forward<QuantumKernel>(kernel),
+                               op, std::forward<Args>(args)...);
         },
+#else
+        [&kernel, shots,
+         args = std::forward_as_tuple(std::forward<Args>(args)...)](
+            std::size_t i, spin_op &op) mutable {
+          return std::apply(
+              [&](auto &&...args) {
+                observe_async(shots, i, std::forward<QuantumKernel>(kernel), op,
+                              std::forward<Args>(args)...);
+              },
+              std::move(args));
+        },
+#endif
         H, nQpus);
 
   return details::runObservation(
-             [&kernel, ... args = std::forward<Args>(args)]() mutable {
-               kernel(args...);
+             [&kernel, &args...]() mutable {
+               kernel(std::forward<Args>(args)...);
              },
              H, platform, shots, kernelName)
       .value();
 }
 
-/// \brief Asynchronously compute the expected value of `H` with respect to
-/// `kernel(Args...)`.
+/// \brief Compute the expected value of `H` with respect to `kernel(Args...)`.
+/// Specify the observation options
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
+observe_result observe(const observe_options &options, QuantumKernel &&kernel,
+                       spin_op H, Args &&...args) {
+  auto &platform = cudaq::get_platform();
+  auto kernelName = cudaq::getKernelName(kernel);
+  auto shots = options.shots;
+
+  platform.set_noise(&options.noise);
+
+  auto ret = details::runObservation(
+                 [&kernel, &args...]() mutable {
+                   kernel(std::forward<Args>(args)...);
+                 },
+                 H, platform, shots, kernelName)
+                 .value();
+
+  platform.reset_noise();
+  return ret;
+}
+
+/// \brief Asynchronously compute the expected value of `H` with respect to
+/// `kernel(Args...)`.
+#if CUDAQ_USE_STD20
+template <typename QuantumKernel, typename... Args>
+  requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 auto observe_async(const std::size_t qpu_id, QuantumKernel &&kernel, spin_op &H,
                    Args &&...args) {
   // Run this SHOTS times
@@ -363,34 +486,64 @@ auto observe_async(const std::size_t qpu_id, QuantumKernel &&kernel, spin_op &H,
   auto shots = platform.get_shots().value_or(-1);
   auto kernelName = cudaq::getKernelName(kernel);
 
+#if CUDAQ_USE_STD20
   return details::runObservationAsync(
       [&kernel, ... args = std::forward<Args>(args)]() mutable {
         kernel(std::forward<Args>(args)...);
       },
       H, platform, shots, kernelName, qpu_id);
+#else
+  return details::runObservationAsync(
+      [&kernel,
+       args = std::forward_as_tuple(std::forward<Args>(args)...)]() mutable {
+        std::apply(std::move(kernel), std::move(args));
+      },
+      H, platform, shots, kernelName, qpu_id);
+#endif
 }
 
 /// \brief Asynchronously compute the expected value of `H` with respect to
 /// `kernel(Args...)`. Specify the shots.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 auto observe_async(std::size_t shots, std::size_t qpu_id,
                    QuantumKernel &&kernel, spin_op &H, Args &&...args) {
   // Run this SHOTS times
   auto &platform = cudaq::get_platform();
   auto kernelName = cudaq::getKernelName(kernel);
 
+#if CUDAQ_USE_STD20
   return details::runObservationAsync(
       [&kernel, ... args = std::forward<Args>(args)]() mutable {
         kernel(std::forward<Args>(args)...);
       },
       H, platform, shots, kernelName, qpu_id);
+#else
+  return details::runObservationAsync(
+      [&kernel,
+       args = std::forward_as_tuple(std::forward<Args>(args)...)]() mutable {
+        std::apply(std::move(kernel), std::move(args));
+      },
+      H, platform, shots, kernelName, qpu_id);
+#endif
 }
 
 /// \brief Asynchronously compute the expected value of \p H with respect to
 /// `kernel(Args...)`. Default to the `0-th` QPU.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 auto observe_async(QuantumKernel &&kernel, spin_op &H, Args &&...args) {
   return observe_async(0, std::forward<QuantumKernel>(kernel), H,
                        std::forward<Args>(args)...);
@@ -403,8 +556,14 @@ auto observe_async(QuantumKernel &&kernel, spin_op &H, Args &&...args) {
 /// equal length, and the `i-th` element of each vector is used `i-th`
 /// execution of the standard observe function. Results are collected
 /// from the execution of every argument set and returned.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 std::vector<observe_result> observe(QuantumKernel &&kernel, spin_op H,
                                     ArgumentSet<Args...> &&params) {
   // Get the platform and query the number of quantum computers
@@ -418,12 +577,12 @@ std::vector<observe_result> observe(QuantumKernel &&kernel, spin_op H,
           Args &...singleIterParameters) -> observe_result {
     auto shots = platform.get_shots().value_or(-1);
     auto kernelName = cudaq::getKernelName(kernel);
-    auto ret =
-        details::runObservation(
-            [&kernel, ... args = std::forward<decltype(singleIterParameters)>(
-                          singleIterParameters)]() mutable { kernel(args...); },
-            H, platform, shots, kernelName, qpuId, nullptr, counter, N)
-            .value();
+    auto ret = details::runObservation(
+                   [&kernel, &singleIterParameters...]() mutable {
+                     kernel(std::forward<Args>(singleIterParameters)...);
+                   },
+                   H, platform, shots, kernelName, qpuId, nullptr, counter, N)
+                   .value();
     return ret;
   };
 
@@ -440,8 +599,14 @@ std::vector<observe_result> observe(QuantumKernel &&kernel, spin_op H,
 /// execution of the standard observe function. Results are collected
 /// from the execution of every argument set and returned. This overload
 /// allows the number of circuit executions (shots) to be specified.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 std::vector<observe_result> observe(std::size_t shots, QuantumKernel &&kernel,
                                     spin_op H, ArgumentSet<Args...> &&params) {
   // Get the platform and query the number of quantum computers
@@ -454,18 +619,67 @@ std::vector<observe_result> observe(std::size_t shots, QuantumKernel &&kernel,
       [&](std::size_t qpuId, std::size_t counter, std::size_t N,
           Args &...singleIterParameters) -> observe_result {
     auto kernelName = cudaq::getKernelName(kernel);
-    auto ret =
-        details::runObservation(
-            [&kernel, ... args = std::forward<decltype(singleIterParameters)>(
-                          singleIterParameters)]() mutable { kernel(args...); },
-            H, platform, shots, kernelName, qpuId, nullptr, counter, N)
-            .value();
+    auto ret = details::runObservation(
+                   [&kernel, &singleIterParameters...]() mutable {
+                     kernel(std::forward<Args>(singleIterParameters)...);
+                   },
+                   H, platform, shots, kernelName, qpuId, nullptr, counter, N)
+                   .value();
     return ret;
   };
 
   // Broadcast the executions and return the results.
   return details::broadcastFunctionOverArguments<observe_result, Args...>(
       numQpus, platform, functor, params);
+}
+
+/// @brief Run the standard observe functionality over a set of N
+/// argument packs. For a kernel with signature `void(Args...)`, this
+/// function takes as input a set of `vector<Arg>...`, a vector for
+/// each argument type in the kernel signature. The vectors must be of
+/// equal length, and the `i-th` element of each vector is used `i-th`
+/// execution of the standard observe function. Results are collected
+/// from the execution of every argument set and returned. This overload
+/// allows the `observe_options` to be specified.
+#if CUDAQ_USE_STD20
+template <typename QuantumKernel, typename... Args>
+  requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
+std::vector<observe_result> observe(cudaq::observe_options &options,
+                                    QuantumKernel &&kernel, spin_op H,
+                                    ArgumentSet<Args...> &&params) {
+  // Get the platform and query the number of quantum computers
+  auto &platform = cudaq::get_platform();
+  auto numQpus = platform.num_qpus();
+  auto shots = options.shots;
+
+  platform.set_noise(&options.noise);
+
+  // Create the functor that will broadcast the observations across
+  // all requested argument sets provided.
+  details::BroadcastFunctorType<observe_result, Args...> functor =
+      [&](std::size_t qpuId, std::size_t counter, std::size_t N,
+          Args &...singleIterParameters) -> observe_result {
+    auto kernelName = cudaq::getKernelName(kernel);
+    auto ret = details::runObservation(
+                   [&kernel, &singleIterParameters...]() mutable {
+                     kernel(std::forward<Args>(singleIterParameters)...);
+                   },
+                   H, platform, shots, kernelName, qpuId, nullptr, counter, N)
+                   .value();
+    return ret;
+  };
+
+  // Broadcast the executions and return the results.
+  auto ret = details::broadcastFunctionOverArguments<observe_result, Args...>(
+      numQpus, platform, functor, params);
+
+  platform.reset_noise();
+  return ret;
 }
 
 /// @brief Run the standard observe functionality over a set of `N`
@@ -475,8 +689,14 @@ std::vector<observe_result> observe(std::size_t shots, QuantumKernel &&kernel,
 /// equal length, and the `i-th` element of each vector is used `i-th`
 /// execution of the standard observe function. Results are collected
 /// from the execution of every argument set and returned.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 [[deprecated("Use observe() overload instead")]] std::vector<observe_result>
 observe_n(QuantumKernel &&kernel, spin_op H, ArgumentSet<Args...> &&params) {
   // Get the platform and query the number of quantum computers
@@ -490,12 +710,12 @@ observe_n(QuantumKernel &&kernel, spin_op H, ArgumentSet<Args...> &&params) {
           Args &...singleIterParameters) -> observe_result {
     auto shots = platform.get_shots().value_or(-1);
     auto kernelName = cudaq::getKernelName(kernel);
-    auto ret =
-        details::runObservation(
-            [&kernel, ... args = std::forward<decltype(singleIterParameters)>(
-                          singleIterParameters)]() mutable { kernel(args...); },
-            H, platform, shots, kernelName, qpuId, nullptr, counter, N)
-            .value();
+    auto ret = details::runObservation(
+                   [&kernel, &singleIterParameters...]() mutable {
+                     kernel(std::forward<Args>(singleIterParameters)...);
+                   },
+                   H, platform, shots, kernelName, qpuId, nullptr, counter, N)
+                   .value();
     return ret;
   };
 
@@ -512,8 +732,14 @@ observe_n(QuantumKernel &&kernel, spin_op H, ArgumentSet<Args...> &&params) {
 /// execution of the standard observe function. Results are collected
 /// from the execution of every argument set and returned. This overload
 /// allows the number of circuit executions (shots) to be specified.
+#if CUDAQ_USE_STD20
 template <typename QuantumKernel, typename... Args>
   requires ObserveCallValid<QuantumKernel, Args...>
+#else
+template <typename QuantumKernel, typename... Args,
+          typename = std::enable_if_t<
+              std::is_invocable_r_v<void, QuantumKernel, Args...>>>
+#endif
 [[deprecated("Use observe() overload instead")]] std::vector<observe_result>
 observe_n(std::size_t shots, QuantumKernel &&kernel, spin_op H,
           ArgumentSet<Args...> &&params) {
@@ -527,12 +753,12 @@ observe_n(std::size_t shots, QuantumKernel &&kernel, spin_op H,
       [&](std::size_t qpuId, std::size_t counter, std::size_t N,
           Args &...singleIterParameters) -> observe_result {
     auto kernelName = cudaq::getKernelName(kernel);
-    auto ret =
-        details::runObservation(
-            [&kernel, ... args = std::forward<decltype(singleIterParameters)>(
-                          singleIterParameters)]() mutable { kernel(args...); },
-            H, platform, shots, kernelName, qpuId, nullptr, counter, N)
-            .value();
+    auto ret = details::runObservation(
+                   [&kernel, &singleIterParameters...]() mutable {
+                     kernel(std::forward<Args>(singleIterParameters)...);
+                   },
+                   H, platform, shots, kernelName, qpuId, nullptr, counter, N)
+                   .value();
     return ret;
   };
 

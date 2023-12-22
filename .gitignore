@@ -70,7 +70,7 @@ __pycache__/
 .cache/*
 
 # LLVM/MLIR files
-*.ll 
+*.ll
 *.bc
 
 # Build results
@@ -83,6 +83,7 @@ docs/sphinx/_doxygen
 docs/sphinx/_mdgen
 **/_build/*
 _version.py
+Debug
 
 # third party integrations
 simulators/

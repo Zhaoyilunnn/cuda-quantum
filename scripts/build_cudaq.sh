@@ -22,13 +22,13 @@
 # Prerequisites:
 # - git, ninja-build, python3, libpython3-dev, libstdc++-12-dev (all available via apt install)
 # - LLVM binaries, libraries, and headers as built by scripts/build_llvm.sh.
-# - To include simulator backends that use cuQuantum the packages cuquantum and cuquantum-dev are needed. 
+# - To include simulator backends that use cuQuantum the packages cuquantum and cuquantum-dev are needed.
 # - Additional python dependencies for running and testing: lit pytest numpy (available via pip install)
 # - Additional dependencies for GPU-accelerated components: cuquantum, cutensor, cuda-11-8
 #
 # Note:
-# The CUDA Quantum build automatically detects whether GPUs are available and will 
-# only include any GPU based components if they are. It is possible to override this 
+# The CUDA Quantum build automatically detects whether GPUs are available and will
+# only include any GPU based components if they are. It is possible to override this
 # behavior and force building GPU components even if no GPU is detected by setting the
 # FORCE_COMPILE_GPU_COMPONENTS environment variable to true. This is useful primarily
 # when building docker images since GPUs may not be accessible during build.
@@ -73,7 +73,7 @@ repo_root=$(cd "$this_file_dir" && git rev-parse --show-toplevel)
 
 # Prepare the build directory
 mkdir -p "$CUDAQ_INSTALL_PREFIX/bin"
-mkdir -p "$working_dir/build" && cd "$working_dir/build" && rm -rf * 
+mkdir -p "$working_dir/build" && cd "$working_dir/build" && rm -rf *
 mkdir -p logs && rm -rf logs/*
 
 if $install_prereqs; then
@@ -98,14 +98,14 @@ fi
 cuda_version=`"${CUDACXX:-nvcc}" --version 2>/dev/null | grep -o 'release [0-9]*\.[0-9]*' | cut -d ' ' -f 2`
 cuda_major=`echo $cuda_version | cut -d '.' -f 1`
 cuda_minor=`echo $cuda_version | cut -d '.' -f 2`
-if [ ! -x "$(command -v nvidia-smi)" ] && [ "$FORCE_COMPILE_GPU_COMPONENTS" != "true" ] ; then # the second check here is to avoid having to use https://discuss.huggingface.co/t/how-to-deal-with-no-gpu-during-docker-build-time/28544 
+if [ ! -x "$(command -v nvidia-smi)" ] && [ "$FORCE_COMPILE_GPU_COMPONENTS" != "true" ] ; then # the second check here is to avoid having to use https://discuss.huggingface.co/t/how-to-deal-with-no-gpu-during-docker-build-time/28544
   echo "No GPU detected - GPU backends will be omitted from the build."
   custatevec_flag=""
 elif [ "$cuda_version" = "" ] || [ "$cuda_major" -lt "11" ] || ([ "$cuda_minor" -lt "7" ] && [ "$cuda_major" -eq "11" ]); then
   echo "CUDA version requirement not satisfied (required: >= 11.8, got: $cuda_version)."
   echo "GPU backends will be omitted from the build."
   custatevec_flag=""
-else 
+else
   echo "CUDA version $cuda_version detected."
   if [ ! -d "$CUQUANTUM_INSTALL_PREFIX" ]; then
     echo "No cuQuantum installation detected. Please set the environment variable CUQUANTUM_INSTALL_PREFIX to enable cuQuantum integration."
@@ -124,7 +124,7 @@ if [ -x "$(command -v "$LLVM_INSTALL_PREFIX/bin/ld.lld")" ]; then
   NVQPP_LD_PATH="$LLVM_INSTALL_PREFIX/bin/ld.lld"
 fi
 
-# Generate CMake files 
+# Generate CMake files
 # (utils are needed for custom testing tools, e.g. CircuitCheck)
 echo "Preparing CUDA Quantum build with LLVM installation in $LLVM_INSTALL_PREFIX..."
 cmake_args="-G Ninja "$repo_root" \
@@ -138,8 +138,9 @@ cmake_args="-G Ninja "$repo_root" \
   -DCMAKE_EXE_LINKER_FLAGS_INIT="$cmake_common_linker_flags_init" \
   -DCMAKE_MODULE_LINKER_FLAGS_INIT="$cmake_common_linker_flags_init" \
   -DCMAKE_SHARED_LINKER_FLAGS_INIT="$cmake_common_linker_flags_init" \
+  -DCUDA_TARGET_ARCHS=70;80 \
   $custatevec_flag"
-if $verbose; then 
+if $verbose; then
   LLVM_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX" cmake $cmake_args
 else
   LLVM_INSTALL_PREFIX="$LLVM_INSTALL_PREFIX" cmake $cmake_args \
@@ -154,7 +155,7 @@ function fail_gracefully {
   cd "$working_dir" && if $is_sourced; then return 1; else exit 1; fi
 }
 
-if $verbose; then 
+if $verbose; then
   ninja install || fail_gracefully
 else
   echo "The progress of the build is being logged to $logs_dir/ninja_output.txt."
